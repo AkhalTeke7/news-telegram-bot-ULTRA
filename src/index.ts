@@ -2,6 +2,7 @@ import { createApi } from './api';
 import { runNewsPipeline } from './pipeline';
 import type { Env } from './types';
 import { APP_HTML } from './ui';
+import { buildImageHtml, buildRunFrame, type ImageNewsItem } from './newsImage';
 
 const api = createApi();
 
@@ -26,6 +27,16 @@ export default {
 
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
       return new Response(APP_HTML, { headers: HTML_HEADERS });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/preview/news-image') {
+      const sample: ImageNewsItem[] = [
+        { id: 1, channelUsername: 'BBC Persian', title: 'اعلام عملیات دولت یمن برای پس گرفتن قلمرو در پی پیشروی حوثی‌ها', summary: 'گزارش تازه درباره عملیات دولت یمن و تغییرات میدانی منطقه.' },
+        { id: 2, channelUsername: 'BBC Persian', title: 'استرالیا در حال بررسی ارتباط کمک‌خلبان هواپیمای فلای‌دبی با آن کشور است', summary: 'مقام‌های استرالیا در حال بررسی اطلاعات مرتبط با کمک‌خلبان این هواپیما هستند.' },
+        { id: 3, channelUsername: 'BBC Persian', title: 'گسترش نفوذ حوثی‌ها در آفریقا؛ ایران چه نقشی دارد؟', summary: 'این گزارش به گسترش نفوذ حوثی‌ها در آفریقا و نقش احتمالی ایران می‌پردازد.' },
+        { id: 4, channelUsername: 'BBC Persian', title: 'اگر جنگ به فضا کشیده شود؛ ماهواره‌ها چگونه هدف قرار می‌گیرند؟', summary: 'گزارشی درباره آسیب‌پذیری ماهواره‌ها در صورت گسترش درگیری‌ها به فضا.' },
+      ];
+      return new Response(buildImageHtml(buildRunFrame(sample, new Date())), { headers: HTML_HEADERS });
     }
 
     if (url.pathname === '/favicon.ico') {

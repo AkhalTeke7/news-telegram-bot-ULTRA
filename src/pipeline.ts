@@ -11,6 +11,7 @@ import { filterPendingMessages } from './adFilterStage';
 import { collectAll } from './collector';
 import { deriveCronStatus, finishCronRun, startCronRun, type CronStatus } from './cronRuns';
 import { runImportanceRanking } from './newsRanking';
+import { collectRss } from './rssCollector';
 import { resolveDestination, runPublishing } from './publisher';
 import { runSummarization } from './summarizer';
 import type { Env } from './types';
@@ -69,7 +70,17 @@ export async function runNewsPipeline(
     }
   };
 
-  const collection = await stage('collect', () => collectAll(db));
+  const collection = await stage('collect', async () => {
+    const telegram = await collectAll(db);
+    const rss = await collectRss(db);
+    return {
+      ...telegram,
+      enabledChannels: telegram.enabledChannels + rss.sources,
+      succeeded: telegram.succeeded + rss.succeeded,
+      failed: telegram.failed + rss.failed,
+      inserted: telegram.inserted + rss.inserted,
+    };
+  });
   // Local, offline filter. Runs before any OpenCode request is made.
   const filter = await stage('filter', () => filterPendingMessages(db));
   const summarization = await stage('summarize', () =>

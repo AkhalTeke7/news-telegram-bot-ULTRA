@@ -56,6 +56,8 @@ export interface ImageFrame {
   time: string;
   /** Pre-formatted source line, e.g. `منبع: @a` or `منابع: @a · @b`. */
   footer: string;
+  /** Brand signature displayed in the footer. */
+  signature?: string;
   items: ImageNewsItem[];
 }
 
@@ -127,7 +129,13 @@ export function selectTopNews(
   items: readonly PublishableMessage[],
   limit = MAX_IMAGE_ITEMS
 ): ImageNewsItem[] {
-  const usable = items.filter((i) => i.summaryText.trim().length > 0);
+  // An explicit AI score of 1 means "not worth publishing". Keep NULL rows
+  // as a backwards-compatible fallback for messages created before the
+  // importance migration; a failed ranking run must not make those rows vanish
+  // from the normal publishing path.
+  const usable = items.filter(
+    (i) => i.summaryText.trim().length > 0 && i.importance !== 1
+  );
   if (usable.length === 0 || limit <= 0) return [];
 
   const ranked = [...usable].sort((a, b) => {
@@ -146,6 +154,18 @@ export function selectTopNews(
     title: item.title && item.title.trim() ? item.title.trim() : deriveCardTitle(item.summaryText),
     summary: item.summaryText,
   }));
+}
+
+/** Glossy decorative bubbles matching the reference dashboard. */
+function bubbles(): string {
+  const bubble = (cls: string, left: number, top: number, size: number): string =>
+    `<div class="bubble ${cls}" style="left:${left}px;top:${top}px;width:${size}px;height:${size}px"></div>`;
+  return [
+    bubble('gold', 420, 50, 96),
+    bubble('', 36, 760, 150),
+    bubble('gold mini', 170, 930, 48),
+    bubble('', 1700, 905, 96),
+  ].join('');
 }
 
 /** Deterministic particle scatter: seeded PRNG, never Math.random(). */
@@ -188,7 +208,7 @@ export function buildImageHtml(frame: ImageFrame): string {
   const cards = frame.items
     .map(
       (item, i) => `<article class="card" style="--accent:${
-        ['#4f8cff', '#22d3ee', '#a78bfa', '#34d399'][i % 4]
+        ['#3f5efb', '#8e54bf', '#fc466b', '#43b89c'][i % 4]
       }">
         <div class="src">@${esc(item.channelUsername)}</div>
         <h2>${esc(item.title)}</h2>
@@ -203,6 +223,9 @@ export function buildImageHtml(frame: ImageFrame): string {
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bitcount+Ink&display=block" rel="stylesheet">
 <style>
   @font-face{font-family:'Vazirmatn';font-style:normal;font-weight:400;font-display:block;
     src:url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/webfonts/Vazirmatn-Regular.woff2') format('woff2');}
@@ -210,46 +233,57 @@ export function buildImageHtml(frame: ImageFrame): string {
     src:url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/webfonts/Vazirmatn-Bold.woff2') format('woff2');}
   *{margin:0;padding:0;box-sizing:border-box}
   html,body{width:${IMAGE_WIDTH}px;height:${IMAGE_HEIGHT}px;overflow:hidden}
-  body{font-family:'Vazirmatn',system-ui,sans-serif;color:#fff;position:relative;
+  body{font-family:'Vazirmatn',system-ui,sans-serif;color:#1d2433;position:relative;
     background:
-      radial-gradient(ellipse 62% 62% at 82% 8%, rgba(37,99,235,.42), transparent 70%),
-      radial-gradient(ellipse 60% 60% at 12% 95%, rgba(124,58,237,.34), transparent 70%),
-      linear-gradient(135deg,#04060f 0%,#0a1230 45%,#120c28 100%);}
+      radial-gradient(circle at 10% 8%, rgba(252,70,107,.20), transparent 28%),
+      radial-gradient(circle at 92% 88%, rgba(63,94,251,.24), transparent 34%),
+      linear-gradient(135deg,#e8edf8 0%,#dfe5f1 42%,#eef1ed 100%);}
   .particles{position:absolute;inset:0}
   .particles i{position:absolute;border-radius:50%;display:block}
-  .frame{position:relative;width:${IMAGE_WIDTH}px;height:${IMAGE_HEIGHT}px;padding:96px 130px 0;display:flex;flex-direction:column}
-  .head{display:flex;justify-content:space-between;align-items:flex-start}
-  .head h1{font-size:62px;font-weight:800;line-height:1.15}
-  .kicker{font-size:30px;font-weight:500;color:#9fb6d4;margin-top:10px}
+  .bubble{position:absolute;pointer-events:none;border-radius:50%;background:radial-gradient(circle at 30% 24%,rgba(255,255,255,.95),rgba(255,255,255,.2) 18%,rgba(150,170,205,.35) 100%);border:1px solid rgba(255,255,255,.8);box-shadow:inset 8px 8px 18px rgba(255,255,255,.9),inset -11px -14px 24px rgba(105,120,155,.35),0 20px 30px rgba(70,80,110,.2)}
+  .bubble.gold{background:radial-gradient(circle at 30% 24%,#fffbe6,rgba(255,225,120,.5) 20%,rgba(238,176,30,.45) 100%)}
+  .bubble.mini{box-shadow:inset 3px 3px 7px rgba(255,251,225,.9),inset -4px -5px 9px rgba(200,140,10,.28),0 8px 12px rgba(190,140,30,.2)}
+  .frame{position:relative;width:${IMAGE_WIDTH}px;height:${IMAGE_HEIGHT}px;padding:72px 78px 0;display:flex;flex-direction:column}
+  .frame::before{content:'';position:absolute;inset:168px 28px 34px;border-radius:42px;
+    background:rgba(255,255,255,.38);border:2px solid rgba(255,255,255,.72);
+    box-shadow:0 24px 70px rgba(63,94,251,.12),inset 0 1px 0 rgba(255,255,255,.88);z-index:-1}
+  .head{display:flex;justify-content:space-between;align-items:flex-start;padding:0 18px}
+  .head h1{font-size:58px;font-weight:800;line-height:1.15;color:#202838;letter-spacing:-1px}
+  .kicker{font-size:30px;font-weight:500;color:#6e7483;margin-top:10px}
   .pill{display:flex;align-items:center;gap:26px;padding:26px 40px;border-radius:52px;
-    background:linear-gradient(180deg,rgba(255,255,255,.15),rgba(255,255,255,.055));
-    border:2px solid rgba(255,255,255,.26);font-size:32px;font-weight:600}
-  .pill .time{font-weight:700;color:#7dd3fc}
+    background:linear-gradient(180deg,rgba(255,255,255,.78),rgba(255,255,255,.42));
+    border:2px solid rgba(255,255,255,.82);font-size:32px;font-weight:600;color:#343b4a;box-shadow:0 14px 32px rgba(63,94,251,.12)}
+  .pill{position:relative;min-width:420px;min-height:150px;justify-content:center;flex-direction:column;gap:2px}
+  .pill svg{position:absolute;inset:0;width:100%;height:100%;z-index:-1;fill:rgba(180,210,245,.45);stroke:rgba(255,255,255,.9);stroke-width:2;filter:drop-shadow(0 10px 14px rgba(70,95,150,.22))}
+  .pill .time{font-weight:700;color:#3a6fb8}
   .rule{height:2px;margin-top:42px;border-radius:1px;
-    background:linear-gradient(90deg,transparent,#4f8cff 50%,transparent)}
-  .grid{flex:1;display:grid;gap:20px;padding:24px 0 0;min-height:0}
+    background:linear-gradient(90deg,transparent,#8e54bf 42%,#fc466b 72%,transparent)}
+  .grid{flex:1;display:grid;gap:22px;padding:28px 28px 0;min-height:0}
   .grid.one{grid-template-columns:1fr;grid-template-rows:1fr}
   .grid.two{grid-template-columns:1fr 1fr;grid-template-rows:1fr}
   .grid.three{grid-template-columns:1fr 1fr;grid-template-rows:auto 1fr}
   .grid.three .card:first-child{grid-column:1/-1}
   .grid.four{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
-  .card{position:relative;overflow:hidden;border-radius:34px;padding:28px 44px 28px 56px;
-    background:linear-gradient(180deg,rgba(255,255,255,.15),rgba(255,255,255,.055));
-    border:2px solid rgba(255,255,255,.30);
+  .card{position:relative;overflow:hidden;border-radius:28px;padding:30px 40px 30px 52px;
+    background:linear-gradient(180deg,rgba(255,255,255,.82),rgba(255,255,255,.48));
+    border:2px solid rgba(255,255,255,.86);
+    box-shadow:0 18px 42px rgba(63,94,251,.13), inset 0 1px 0 rgba(255,255,255,.9);
     display:flex;flex-direction:column;justify-content:center;gap:12px}
   .card::before{content:'';position:absolute;inset:0 0 auto 0;height:40%;
-    background:linear-gradient(180deg,rgba(255,255,255,.10),transparent);pointer-events:none}
+    background:linear-gradient(180deg,rgba(255,255,255,.55),transparent);pointer-events:none}
   .card::after{content:'';position:absolute;top:22%;bottom:22%;right:0;width:5px;border-radius:3px;
     background:var(--accent);opacity:.75}
-  .card .src{position:relative;font-size:24px;font-weight:600;color:#7dd3fc;direction:ltr;
+  .card .src{position:relative;font-size:24px;font-weight:600;color:#3f5efb;direction:ltr;
     text-align:right;letter-spacing:.5px}
-  .card h2{position:relative;font-size:44px;font-weight:800;line-height:1.32}
-  .card p{position:relative;font-size:29px;font-weight:400;line-height:1.45;color:#d7e6f7;opacity:.93}
-  .foot{padding:24px 0 38px;font-size:32px;font-weight:600;color:#cfe0f5;text-align:right}
+  .card h2{position:relative;font-size:40px;font-weight:800;line-height:1.32;color:#202838}
+  .card p{position:relative;font-size:27px;font-weight:400;line-height:1.45;color:#596274;opacity:.93}
+  .foot{display:flex;justify-content:space-between;align-items:center;padding:22px 28px 34px;font-size:28px;font-weight:600;color:#596274;text-align:right}
+  .sig{font-family:'Bitcount Ink',system-ui,sans-serif;font-size:34px;font-weight:400;letter-spacing:1px;color:#8e54bf;direction:ltr}
 </style>
 </head>
 <body>
-  <div class="particles">${particles(78, 0x5eed1234)}</div>
+  <div class="particles">${particles(14, 0x5eed1234)}</div>
+  ${bubbles()}
   <div class="frame">
     <div class="head">
       <div>
@@ -257,6 +291,7 @@ export function buildImageHtml(frame: ImageFrame): string {
         <div class="kicker">${esc(frame.kicker)}</div>
       </div>
       <div class="pill">
+        <svg viewBox="0 0 372 150" aria-hidden="true"><path d="M66 128A34 34 0 0 1 66 60A32 32 0 0 1 122 44A52 52 0 0 1 214 40A50 50 0 0 1 306 60A34 34 0 0 1 306 128Z"/></svg>
         <span>${esc(frame.date)}</span><span class="time">${esc(frame.time)}</span>
       </div>
     </div>
@@ -264,7 +299,7 @@ export function buildImageHtml(frame: ImageFrame): string {
     <section class="grid ${grid}">
         ${cards}
     </section>
-    <div class="foot">${esc(frame.footer)}</div>
+    <div class="foot"><span>${esc(frame.footer)}</span><span class="sig">${esc(frame.signature ?? 'Akhal-Teke')}</span></div>
   </div>
 </body>
 </html>`;
