@@ -14,6 +14,11 @@ import { recordModelFailure, resolveFreeModel } from './modelManager';
 import { DEFAULT_WINDOW_MS } from './collector';
 
 export const MAX_MESSAGES_PER_RUN = 20;
+/**
+ * Consecutive soft failures (bad JSON, timeout, network) tolerated from one
+ * free model before the run rotates to another one.
+ */
+export const MAX_MODEL_FAILURES = 2;
 
 export interface EligibleMessage {
   id: number;
@@ -43,6 +48,10 @@ export interface SummarizeReport {
   eligible: number;
   summarized: number;
   failed: MessageFailure[];
+  /** Failure counts per safe category, so a run report can say WHY it failed. */
+  failureCategories: Record<string, number>;
+  /** Free model ids this run gave up on, in order. */
+  abandonedModels: string[];
   /** Items the model judged advertisement or not news. */
   rejected: number;
   /** Summarized rows that received a real AI headline. */
@@ -209,6 +218,8 @@ export async function runSummarization(
     eligible: messages.length,
     summarized: 0,
     failed: [],
+    failureCategories: {},
+    abandonedModels: [],
     rejected: 0,
     withTitle: 0,
     model: null,
@@ -216,16 +227,24 @@ export async function runSummarization(
     truncated: messages.length >= (opts.limit ?? MAX_MESSAGES_PER_RUN),
   };
 
+  /** Records one item failure and keeps the per-category counters in sync. */
+  const fail = (messageId: number, category: string): void => {
+    report.failed.push({ messageId, category });
+    report.failureCategories[category] = (report.failureCategories[category] ?? 0) + 1;
+  };
+
   if (messages.length === 0) return report;
 
   if (!opts.apiKey) {
     log({ operation: 'summarize', status: 'skipped', category: 'config_missing', count: messages.length });
-    for (const m of messages) report.failed.push({ messageId: m.id, category: 'config_missing' });
+    for (const m of messages) fail(m.id, 'config_missing');
     return report;
   }
 
   const apiKey = opts.apiKey;
   const excluded: string[] = [];
+  /** Consecutive soft failures of the model currently in use. */
+  let consecutiveFailures = 0;
   let model = (
     await resolveFreeModel(db, {
       fetchImpl: opts.fetchImpl,
@@ -237,7 +256,7 @@ export async function runSummarization(
 
   if (!model) {
     log({ operation: 'summarize', status: 'skipped', category: 'no_free_model', count: messages.length });
-    for (const m of messages) report.failed.push({ messageId: m.id, category: 'no_free_model' });
+    for (const m of messages) fail(m.id, 'no_free_model');
     return report;
   }
   report.model = model;
@@ -251,7 +270,7 @@ export async function runSummarization(
       // the summary. The source channel's own identity is the only one allowed.
       const newsBody = stripExternalIdentifiers(message.messageText, message.channelUsername);
       if (newsBody.length === 0) {
-        report.failed.push({ messageId: message.id, category: 'empty_after_filter' });
+        fail(message.id, 'empty_after_filter');
         continue;
       }
 
@@ -271,6 +290,7 @@ export async function runSummarization(
       if (isAdvertisement || !isNews) {
         await markRejectedByAi(db, message.id, isAdvertisement ? 'ai_advertisement' : 'ai_not_news');
         report.rejected++;
+        consecutiveFailures = 0;
         log({
           operation: 'summarize',
           status: 'rejected',
@@ -293,6 +313,7 @@ export async function runSummarization(
       }
       report.summarized++;
       report.withTitle += safeTitle ? 1 : 0;
+      consecutiveFailures = 0;
       log({
         operation: 'summarize',
         status: 'ok',
@@ -305,7 +326,7 @@ export async function runSummarization(
       });
     } catch (error) {
       const category = categorize(error);
-      report.failed.push({ messageId: message.id, category });
+      fail(message.id, category);
       log({
         operation: 'summarize',
         status: 'error',
@@ -318,25 +339,40 @@ export async function runSummarization(
       });
 
       // Rotate away from a failing model, but only among proven-free models.
-      if (category === 'rate_limited' || category === 'provider_error') {
+      //
+      // A model is abandoned immediately when the provider itself rejects the
+      // call (rate limit / HTTP error), and after MAX_MODEL_FAILURES
+      // consecutive soft failures (unparsable answer, timeout, network blip).
+      // The soft case is what used to burn a whole run: a free endpoint that
+      // answers 200 with prose instead of JSON produced 20 identical
+      // `invalid_response` errors and never rotated.
+      consecutiveFailures++;
+      const hardFailure = category === 'rate_limited' || category === 'provider_error';
+      if (hardFailure || consecutiveFailures >= MAX_MODEL_FAILURES) {
         await recordModelFailure(db, currentModel, category, now);
         excluded.push(currentModel);
+        report.abandonedModels.push(currentModel);
         report.modelRotations++;
+        consecutiveFailures = 0;
 
         const next = (
           await resolveFreeModel(db, {
             fetchImpl: opts.fetchImpl,
             baseUrl: opts.baseUrl,
             now,
-            forceRefresh: true,
+            // The list is only re-queried for provider-side failures; a model
+            // that merely answers badly does not mean the catalog is stale.
+            forceRefresh: hardFailure,
             exclude: excluded,
+            // The admin pin must not be re-selected after it just failed.
+            ignorePin: true,
           })
         ).model;
 
         if (!next) {
           log({ operation: 'summarize', status: 'aborted', category: 'no_free_model' });
           for (const rest of messages.slice(messages.indexOf(message) + 1)) {
-            report.failed.push({ messageId: rest.id, category: 'no_free_model' });
+            fail(rest.id, 'no_free_model');
           }
           report.model = currentModel;
           return report;

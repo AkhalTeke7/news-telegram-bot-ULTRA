@@ -436,6 +436,9 @@ export interface RankCandidate {
   summary: string;
 }
 
+/** Score given to candidates the model did not mention at all. */
+export const OMITTED_IMPORTANCE = 2;
+
 export interface RankedItem {
   id: number;
   importance: number;
@@ -511,10 +514,12 @@ export function parseRanking(content: string, items: RankCandidate[]): RankedIte
     out.push({ id: items[index].id, importance });
   }
 
-  // Any candidate the model omitted still ranks, with the lowest score, so a
-  // partial answer can never silently drop news from the digest.
+  // Any candidate the model omitted still ranks, just below the middle. It is
+  // deliberately NOT 1: importance 1 is the explicit "not worth publishing"
+  // verdict and removes a row from the run image, so a partial/lazy answer
+  // would otherwise silently empty the picture.
   for (let i = 0; i < items.length; i++) {
-    if (!seen.has(i)) out.push({ id: items[i].id, importance: 1 });
+    if (!seen.has(i)) out.push({ id: items[i].id, importance: OMITTED_IMPORTANCE });
   }
   return out;
 }

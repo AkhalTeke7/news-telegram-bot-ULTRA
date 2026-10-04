@@ -22,6 +22,8 @@ import {
   setChannelEnabled,
 } from './channels';
 import { getCronSummary, getLastCronRun } from './cronRuns';
+import { getFreeModelCatalog, setPinnedModel, type FreeModelCatalog } from './modelManager';
+import { AiError } from './openrouter';
 import { runNewsPipeline } from './pipeline';
 import { getChannelStats, getStatusReport } from './status';
 import { addSourceChannel } from './sourceChannels';
@@ -167,6 +169,7 @@ export function menuKeyboard(): InlineKeyboardMarkup {
         { text: '🧪 پیام آزمایشی', callback_data: 'msg:test' },
         { text: '🖼 تصویر آزمایشی', callback_data: 'img:test' },
       ],
+      [{ text: '🧠 انتخاب مدل رایگان', callback_data: 'mdl:list' }],
     ],
   };
 }
@@ -270,15 +273,92 @@ async function renderAiStatus(env: Env): Promise<string> {
   const ageMs = Number.isFinite(refreshedMs) ? Date.now() - refreshedMs : Number.NaN;
   const fresh = Number.isFinite(ageMs) && ageMs < 24 * 60 * 60 * 1000;
 
+  const pinned = (await getSetting(env.DB, 'pinned_model')) ?? '';
+
   return [
     '🤖 وضعیت مدل AI',
     '',
     `تعداد مدل‌های Free: ${count}`,
     `مدل فعال: ${selected ?? '—'}`,
+    `نحوهٔ انتخاب: ${pinned.trim() ? `دستی (${pinned.trim()})` : 'خودکار'}`,
     `آخرین refresh: ${faDate(refreshedAt)}`,
     `وضعیت فهرست: ${count === 0 ? 'خالی' : fresh ? 'به‌روز' : 'قدیمی (نیازمند refresh)'}`,
     `آخرین خطای مدل: ${failure ? 'ثبت شده' : 'ندارد'}`,
   ].join('\n');
+}
+
+/* ---------------------------------------------------------- model picker -- */
+
+/** Free models shown per screen; keeps the inline keyboard inside Telegram limits. */
+export const MODELS_PER_PAGE = 6;
+
+/**
+ * Model-picker screen. Reads the CACHED catalog only, so merely browsing never
+ * spends an OpenRouter subrequest; the «به‌روزرسانی» button is the one explicit
+ * refresh path.
+ */
+export function renderModelPicker(catalog: FreeModelCatalog, page: number): string {
+  if (catalog.models.length === 0) {
+    return [
+      '🧠 انتخاب مدل رایگان',
+      '',
+      'فهرست مدل‌های رایگان خالی است.',
+      'دکمهٔ «🔄 به‌روزرسانی فهرست» را بزنید تا فهرست از OpenRouter گرفته شود.',
+    ].join('\n');
+  }
+
+  const pages = Math.max(1, Math.ceil(catalog.models.length / MODELS_PER_PAGE));
+  const current = clampPage(page, pages);
+  const slice = catalog.models.slice(current * MODELS_PER_PAGE, (current + 1) * MODELS_PER_PAGE);
+
+  return [
+    '🧠 انتخاب مدل رایگان',
+    '',
+    `حالت انتخاب: ${catalog.pinned ? 'دستی' : 'خودکار'}`,
+    `مدل فعلی: ${catalog.selected ?? '—'}`,
+    `تعداد مدل‌های رایگان: ${catalog.models.length}`,
+    `آخرین به‌روزرسانی فهرست: ${faDate(catalog.refreshedAt)}`,
+    '',
+    `صفحهٔ ${current + 1} از ${pages}:`,
+    ...slice.map((id) => `${id === catalog.pinned ? '✅' : '•'} ${id}`),
+    '',
+    'برای استفادهٔ دائمی از یک مدل، روی نام آن بزنید. «♻️ خودکار» انتخاب دستی را پاک می‌کند.',
+  ].join('\n');
+}
+
+/**
+ * Keyboard for the model picker. Models are addressed by their INDEX in the
+ * cached list, so callback_data stays short and can never carry arbitrary text.
+ */
+export function modelKeyboard(catalog: FreeModelCatalog, page: number): InlineKeyboardMarkup {
+  const pages = Math.max(1, Math.ceil(catalog.models.length / MODELS_PER_PAGE));
+  const current = clampPage(page, pages);
+  const start = current * MODELS_PER_PAGE;
+  const slice = catalog.models.slice(start, start + MODELS_PER_PAGE);
+
+  const rows: InlineKeyboardMarkup['inline_keyboard'] = slice.map((id, i) => [
+    {
+      text: `${id === catalog.pinned ? '✅ ' : ''}${id.length > 54 ? `${id.slice(0, 53)}…` : id}`,
+      callback_data: `mdl:s:${start + i}`,
+    },
+  ]);
+
+  const nav: InlineKeyboardMarkup['inline_keyboard'][number] = [];
+  if (current > 0) nav.push({ text: '⬅️ قبلی', callback_data: `mdl:p:${current - 1}` });
+  if (current < pages - 1) nav.push({ text: 'بعدی ➡️', callback_data: `mdl:p:${current + 1}` });
+  if (nav.length > 0) rows.push(nav);
+
+  rows.push([
+    { text: '♻️ خودکار', callback_data: 'mdl:auto' },
+    { text: '🔄 به‌روزرسانی فهرست', callback_data: 'mdl:refresh' },
+  ]);
+  rows.push([{ text: '🔙 منوی اصلی', callback_data: 'menu' }]);
+  return { inline_keyboard: rows };
+}
+
+function clampPage(page: number, pages: number): number {
+  if (!Number.isInteger(page) || page < 0) return 0;
+  return Math.min(page, pages - 1);
 }
 
 async function renderLastRun(env: Env): Promise<string> {
@@ -360,14 +440,41 @@ export function renderTestMessageResult(result: TestMessageResult): string {
   return ['❌ ارسال پیام آزمایشی ناموفق بود.', '', result.message + hint].join('\n');
 }
 
+/** Safe Persian labels for the AI failure categories a run can report. */
+const AI_ERROR_LABELS: Record<string, string> = {
+  config_missing: 'کلید API تنظیم نشده',
+  no_free_model: 'مدل رایگانی در دسترس نیست',
+  rate_limited: 'محدودیت نرخ درخواست',
+  provider_error: 'خطای سرویس‌دهندهٔ مدل',
+  invalid_response: 'پاسخ نامعتبر مدل',
+  timeout: 'اتمام زمان انتظار',
+  network: 'خطای شبکه',
+  empty_after_filter: 'متن پس از فیلتر خالی شد',
+};
+
+const IMAGE_REASON_LABELS: Record<string, string> = {
+  browser_binding_missing: 'اتصال Browser Run تنظیم نشده است',
+  no_suitable_items: 'خبر مناسبی برای تصویر نبود',
+  render_failed: 'ساخت تصویر ناموفق بود',
+  send_failed: 'ارسال تصویر به تلگرام ناموفق بود',
+};
+
 export function renderPipelineResult(outcome: {
   status: string;
   ranAt: string;
   collectionOnly?: boolean;
   collection: { inserted: number } | null;
   filteredAdvertisements: number;
-  summarization: { summarized: number } | null;
-  publishing: { published: number; bale?: { sent: number; failed: number } } | null;
+  summarization: {
+    summarized: number;
+    model?: string | null;
+    failureCategories?: Record<string, number>;
+  } | null;
+  publishing: {
+    published: number;
+    bale?: { sent: number; failed: number };
+    image?: { sent: boolean; cards: number; reason?: string };
+  } | null;
   itemFailures: number;
   durationMs: number;
 }): string {
@@ -384,8 +491,13 @@ export function renderPipelineResult(outcome: {
     ? ['حالت فقط جمع‌آوری فعال است؛ خلاصه‌سازی و انتشار انجام نشد.']
     : [
         `فیلتر تبلیغات: ${outcome.filteredAdvertisements}`,
-        `خلاصه‌سازی: ${outcome.summarization?.summarized ?? 0}`,
+        `خلاصه‌سازی: ${outcome.summarization?.summarized ?? 0}${
+          outcome.summarization?.model ? ` (مدل: ${outcome.summarization.model})` : ''
+        }`,
+        // Why a run produced nothing used to be invisible in this report.
+        ...describeAiFailures(outcome.summarization?.failureCategories),
         `انتشار: ${outcome.publishing?.published ?? 0}`,
+        ...describeImageOutcome(outcome.publishing?.image),
       ];
 
   return [
@@ -406,6 +518,31 @@ export function renderPipelineResult(outcome: {
   ].join('\n');
 }
 
+/** One line naming the dominant AI failure categories, or nothing. */
+function describeAiFailures(categories: Record<string, number> | undefined): string[] {
+  const entries = Object.entries(categories ?? {});
+  if (entries.length === 0) return [];
+  const text = entries
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([category, count]) => `${AI_ERROR_LABELS[category] ?? category} (${count})`)
+    .join('، ');
+  return [`علت خطای خلاصه‌سازی: ${text}`];
+}
+
+/** One line telling the admin whether the run image reached the channel. */
+function describeImageOutcome(
+  image: { sent: boolean; cards: number; reason?: string } | undefined
+): string[] {
+  if (!image) return [];
+  if (image.sent) return [`تصویر خبری: ارسال شد (${image.cards} کارت)`];
+  return [
+    `تصویر خبری: ارسال نشد — ${
+      image.reason ? (IMAGE_REASON_LABELS[image.reason] ?? image.reason) : 'نامشخص'
+    }`,
+  ];
+}
+
 /* -------------------------------------------------------- callback parsing -- */
 
 export interface ParsedCallback {
@@ -421,7 +558,7 @@ export function parseCallbackData(raw: unknown): ParsedCallback | null {
   const action = parts[0];
   if (!action) return null;
 
-  const ALLOWED = new Set(['menu', 'no', 'ch', 'sys', 'run', 'msg', 'img']);
+  const ALLOWED = new Set(['menu', 'no', 'ch', 'sys', 'run', 'msg', 'img', 'mdl']);
   if (!ALLOWED.has(action)) return null;
 
   const sub = parts[1] ?? '';
@@ -434,6 +571,17 @@ export function parseCallbackData(raw: unknown): ParsedCallback | null {
   if (action === 'ch' && sub === 'add') return { action: 'ch:add', arg: null };
   if (action === 'sys' && ['status', 'ai', 'last'].includes(sub)) return { action: `sys:${sub}`, arg: null };
   if (action === 'run' && ['ask', 'yes', 'no'].includes(sub)) return { action: `run:${sub}`, arg: null };
+  if (action === 'mdl' && (sub === 'p' || sub === 's')) {
+    // Page index / model index. Bounded and numeric only; the model id itself
+    // never travels in callback_data.
+    if (!/^[0-9]{1,4}$/.test(parts[2] ?? '')) return null;
+    const value = Number(parts[2]);
+    if (!Number.isSafeInteger(value) || value < 0) return null;
+    return { action: `mdl:${sub}`, arg: value };
+  }
+  if (action === 'mdl' && ['list', 'auto', 'refresh'].includes(sub)) {
+    return { action: `mdl:${sub}`, arg: null };
+  }
   if (action === 'msg' && sub === 'test') return { action: 'msg:test', arg: null };
   if (action === 'img' && sub === 'test') return { action: 'img:test', arg: null };
   if (action === 'menu' || action === 'no') return { action, arg: null };
@@ -788,6 +936,54 @@ async function handleCallback(
       await ack('لغو شد.');
       await clearAdminState(env.DB, query.message!.chat.id);
       await editTarget(MENU_TEXT, menuKeyboard());
+      return;
+    }
+    case 'mdl:list':
+    case 'mdl:p': {
+      await ack();
+      const catalog = await getFreeModelCatalog(env.DB);
+      const page = parsed.arg ?? 0;
+      await editTarget(renderModelPicker(catalog, page), modelKeyboard(catalog, page));
+      return;
+    }
+    case 'mdl:refresh': {
+      await ack('در حال دریافت فهرست مدل‌های رایگان…');
+      try {
+        const catalog = await getFreeModelCatalog(env.DB, { refresh: true });
+        await editTarget(renderModelPicker(catalog, 0), modelKeyboard(catalog, 0));
+      } catch (error) {
+        // A failed refresh keeps the cached list usable instead of breaking.
+        const catalog = await getFreeModelCatalog(env.DB);
+        const reason = error instanceof AiError ? error.category : 'unknown';
+        await editTarget(
+          `⚠️ به‌روزرسانی فهرست مدل‌ها ناموفق بود (${reason}).\n\n${renderModelPicker(catalog, 0)}`,
+          modelKeyboard(catalog, 0)
+        );
+      }
+      return;
+    }
+    case 'mdl:auto': {
+      await setPinnedModel(env.DB, null);
+      await ack('انتخاب مدل روی حالت خودکار تنظیم شد.');
+      const catalog = await getFreeModelCatalog(env.DB);
+      await editTarget(renderModelPicker(catalog, 0), modelKeyboard(catalog, 0));
+      return;
+    }
+    case 'mdl:s': {
+      const catalog = await getFreeModelCatalog(env.DB);
+      const index = parsed.arg ?? -1;
+      const model = index >= 0 && index < catalog.models.length ? catalog.models[index] : null;
+      if (!model) {
+        // Stale keyboard: the cached list changed since this screen was drawn.
+        await ack('این فهرست قدیمی است؛ دوباره باز کنید.');
+        await editTarget(renderModelPicker(catalog, 0), modelKeyboard(catalog, 0));
+        return;
+      }
+      const outcome = await setPinnedModel(env.DB, model);
+      await ack(outcome === 'pinned' ? 'مدل انتخاب شد.' : 'این مدل در فهرست رایگان نیست.');
+      const updated = await getFreeModelCatalog(env.DB);
+      const page = Math.floor(index / MODELS_PER_PAGE);
+      await editTarget(renderModelPicker(updated, page), modelKeyboard(updated, page));
       return;
     }
     case 'msg:test': {

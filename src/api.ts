@@ -13,6 +13,8 @@ import {
   setChannelEnabled,
 } from './channels';
 import { runNewsPipeline } from './pipeline';
+import { getFreeModelCatalog, setPinnedModel } from './modelManager';
+import { AiError } from './openrouter';
 import { isCollectionOnly, setCollectionOnly } from './processingMode';
 import { resolveDestination } from './publisher';
 import { addSourceChannel } from './sourceChannels';
@@ -146,6 +148,52 @@ export function createApi(): Hono<Bindings> {
     }
     await setCollectionOnly(c.env.DB, body.collectionOnly);
     return c.json({ collectionOnly: body.collectionOnly });
+  });
+
+  /**
+   * FREE model catalog + manual selection.
+   *
+   * GET  /api/models              → cached list, current + pinned model
+   * GET  /api/models?refresh=1    → re-queries OpenRouter first
+   * POST /api/models { model }    → pin one free model ("" / null = automatic)
+   *
+   * Only ids proven free by discovery can be pinned; the free-only rule is
+   * enforced in setPinnedModel(), never here.
+   */
+  app.get('/api/models', async (c) => {
+    const refresh = ['1', 'true', 'yes'].includes((c.req.query('refresh') ?? '').toLowerCase());
+    try {
+      const catalog = await getFreeModelCatalog(c.env.DB, { refresh });
+      return c.json(catalog);
+    } catch (error) {
+      if (refresh && error instanceof AiError) {
+        // The refresh failed: still answer with the cached catalog so the admin
+        // panel degrades instead of breaking.
+        const catalog = await getFreeModelCatalog(c.env.DB);
+        return c.json({ ...catalog, refreshError: error.category });
+      }
+      throw error;
+    }
+  });
+
+  app.post('/api/models', async (c) => {
+    const body = await readJson(c);
+    if (!body) return fail(c, 400, 'بدنه درخواست باید JSON معتبر و کوچک باشد.');
+
+    const raw = body.model;
+    if (raw !== null && typeof raw !== 'string') {
+      return fail(c, 400, 'فیلد model باید رشته یا null باشد.');
+    }
+    if (typeof raw === 'string' && raw.length > 200) {
+      return fail(c, 400, 'شناسهٔ مدل بیش از حد طولانی است.');
+    }
+
+    const outcome = await setPinnedModel(c.env.DB, raw);
+    if (outcome === 'unknown_model') {
+      return fail(c, 422, 'این مدل در فهرست مدل‌های رایگان نیست. ابتدا فهرست را به‌روزرسانی کنید.');
+    }
+    const catalog = await getFreeModelCatalog(c.env.DB);
+    return c.json({ ...catalog, outcome });
   });
 
   /**

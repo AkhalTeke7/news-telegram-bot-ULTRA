@@ -51,6 +51,7 @@ export interface StatusReport {
     freeModelsCached: number;
     lastModelRefreshAt: string | null;
     lastModelFailure: string | null;
+    pinnedModel: string | null;
   };
   publishing: {
     destinationConfigured: boolean;
@@ -143,6 +144,7 @@ export async function getStatusReport(
       getSetting(db, 'free_models_refreshed_at'),
       getSetting(db, 'last_model_failure'),
       getSetting(db, COLLECTION_ONLY_SETTING),
+      getSetting(db, 'pinned_model'),
     ]),
   ]);
 
@@ -190,6 +192,8 @@ export async function getStatusReport(
       freeModelsCached: parseCount(ai[1]),
       lastModelRefreshAt: ai[2],
       lastModelFailure: ai[3],
+      /** Admin-pinned model id, or null when selection is automatic. */
+      pinnedModel: (ai[5] ?? '').trim() || null,
     },
     publishing: { destinationConfigured: opts.destinationConfigured },
     processing: { collectionOnly: ai[4] === '1' },

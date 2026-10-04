@@ -47,7 +47,16 @@ export interface PipelineOutcome {
   /** Advertisements blocked before any OpenRouter call. */
   filteredAdvertisements: number;
   filter: { checked: number; filtered: number; passed: number } | null;
-  summarization: { eligible: number; summarized: number; failed: number; model: string | null } | null;
+  summarization: {
+    eligible: number;
+    summarized: number;
+    failed: number;
+    model: string | null;
+    /** Safe failure categories and their counts, e.g. { invalid_response: 20 }. */
+    failureCategories: Record<string, number>;
+    /** Free models this run gave up on (rotation trace). */
+    abandonedModels: string[];
+  } | null;
   ranking: { candidates: number; ranked: number; important: number; error?: string } | null;
   publishing: {
     eligible: number;
@@ -56,6 +65,12 @@ export interface PipelineOutcome {
     rateLimited: boolean;
     /** Present only when the Bale mirror is configured. */
     bale?: { sent: number; failed: number };
+    /**
+     * The single run image. Absent when nothing was publishable; `sent: false`
+     * with a `reason` when it was attempted and did not reach the channel —
+     * previously this outcome was invisible in every report.
+     */
+    image?: { sent: boolean; cards: number; ticker: number; reason?: string };
   } | null;
   durationMs: number;
 }
@@ -166,6 +181,8 @@ export async function runNewsPipeline(
       summarized: summarization.summarized,
       failed: summarization.failed.length,
       model: summarization.model,
+      failureCategories: summarization.failureCategories,
+      abandonedModels: summarization.abandonedModels,
     },
     ranking: ranking && {
       candidates: ranking.candidates,
@@ -179,6 +196,7 @@ export async function runNewsPipeline(
       failed: publishing.failures.length,
       rateLimited: publishing.rateLimited,
       bale: publishing.bale,
+      image: describeImage(publishing, env),
     },
     durationMs: Date.now() - startedAt,
   };
@@ -230,6 +248,35 @@ export async function runNewsPipeline(
   }
 
   return outcome;
+}
+
+/**
+ * Flattens the publisher's image outcome into a report-friendly shape, and
+ * explains the two silent cases: no Browser Run binding configured, and a
+ * render/send failure. Returns undefined when no image was expected at all.
+ */
+function describeImage(
+  publishing: { eligible: number; image?: { sent: boolean; selected: number; channels: number; error?: string } },
+  env: Env
+): { sent: boolean; cards: number; ticker: number; reason?: string } | undefined {
+  if (publishing.image) {
+    const { sent, selected, error } = publishing.image;
+    return {
+      sent,
+      cards: selected,
+      ticker: 0,
+      ...(error ? { reason: error } : {}),
+    };
+  }
+  if (publishing.eligible > 0) {
+    return {
+      sent: false,
+      cards: 0,
+      ticker: 0,
+      reason: env.BROWSER ? 'no_suitable_items' : 'browser_binding_missing',
+    };
+  }
+  return undefined;
 }
 
 function message(error: unknown): string {

@@ -120,6 +120,8 @@ export async function runImportanceRanking(
       now: opts.now,
       forceRefresh: attempt > 0,
       exclude: excluded,
+      // After a failure the admin pin is skipped for the remaining attempts.
+      ignorePin: attempt > 0,
     });
     if (!model) {
       report.error = report.error ?? 'no_free_model';
@@ -139,7 +141,10 @@ export async function runImportanceRanking(
       const category = error instanceof AiError ? error.category : 'unexpected';
       report.error = category;
       // Rotate away from a failing model, but only among proven-free models.
-      if (category === 'rate_limited' || category === 'provider_error') {
+      // Every provider-side failure AND every unusable answer rotates: a free
+      // endpoint that replies with prose instead of a JSON array is just as
+      // useless here as one that returns HTTP 500.
+      if (category !== 'config_missing' && category !== 'no_free_model') {
         await recordModelFailure(db, model, category, opts.now ?? Date.now());
         excluded.push(model);
         continue;
