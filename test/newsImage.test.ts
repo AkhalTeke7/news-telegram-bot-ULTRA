@@ -2,6 +2,7 @@ import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { runPublishing, type PublishableMessage } from '../src/publisher';
 import {
+  buildAlbumCaptions,
   buildImageHtml,
   buildRunFrame,
   buildSourceFooter,
@@ -11,11 +12,12 @@ import {
   IMAGE_WIDTH,
   MAX_IMAGE_ITEMS,
   MAX_TICKER_ITEMS,
-  TICKER_MAX_CHARS,
+  renderRunAlbum,
   renderRunImage,
   selectTickerNews,
   selectTopNews,
   NewsImageError,
+  TICKER_MAX_CHARS,
 } from '../src/newsImage';
 
 const NOW = Date.now();
@@ -86,11 +88,29 @@ function harness(opts: { png?: ArrayBuffer; sendStatus?: number } = {}) {
 
   const texts: string[] = [];
   const photos: number[] = [];
+  const groups: { captions: string[]; count: number }[] = [];
   let messageId = 100;
   const fetchImpl = vi.fn(async (url: unknown, init: RequestInit) => {
     const href = String(url);
-    const isPhoto = href.includes('sendPhoto');
-    if (isPhoto) {
+    if (href.includes('sendMediaGroup')) {
+      order.push('sendMediaGroup');
+      const form = init.body as FormData;
+      const media = JSON.parse(String(form.get('media'))) as { caption?: string }[];
+      groups.push({
+        captions: media.map((item) => item.caption ?? ''),
+        count: media.length,
+      });
+      const status = opts.sendStatus ?? 200;
+      return new Response(
+        JSON.stringify({
+          ok: status < 400,
+          result: media.map(() => ({ message_id: ++messageId })),
+          description: status < 400 ? undefined : 'failed',
+        }),
+        { status, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (href.includes('sendPhoto')) {
       order.push('sendPhoto');
       photos.push(1);
       const status = opts.sendStatus ?? 200;
@@ -128,6 +148,7 @@ function harness(opts: { png?: ArrayBuffer; sendStatus?: number } = {}) {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     texts,
     photos,
+    groups,
   };
 }
 
@@ -443,7 +464,7 @@ describe('renderRunImage', () => {
 });
 
 describe('runPublishing image integration', () => {
-  it('sends ONE image before the per-channel text digests', async () => {
+  it('sends the ALBUM (one card per news) before the per-channel text digests', async () => {
     const a = await seedChannel('news_a');
     const b = await seedChannel('news_b');
     await seedNews(a, 'news_a', 1, 'خبر اول از کانال اول.', 5);
@@ -458,16 +479,20 @@ describe('runPublishing image integration', () => {
       now: new Date(NOW),
     });
 
-    expect(h.browser.quickAction).toHaveBeenCalledTimes(1);
-    expect(h.photos).toHaveLength(1);
+    // One Browser Run render per card, then ONE sendMediaGroup slideshow.
+    expect(h.browser.quickAction).toHaveBeenCalledTimes(2);
+    expect(h.groups).toHaveLength(1);
+    expect(h.groups[0].count).toBe(2);
     expect(h.order[0]).toBe('browser');
-    expect(h.order[1]).toBe('sendPhoto');
+    expect(h.order[1]).toBe('browser');
+    expect(h.order[2]).toBe('sendMediaGroup');
     expect(h.texts).toHaveLength(2);
     expect(report.image?.sent).toBe(true);
     expect(report.image?.channels).toBe(2);
+    expect(report.image?.selected).toBe(2);
   });
 
-  it('sends the image before ANY text message', async () => {
+  it('sends the album before ANY text message', async () => {
     const a = await seedChannel('news_a');
     const b = await seedChannel('news_b');
     const c = await seedChannel('news_c');
@@ -484,27 +509,32 @@ describe('runPublishing image integration', () => {
       now: new Date(NOW),
     });
 
-    expect(h.photos).toHaveLength(1);
+    expect(h.groups).toHaveLength(1);
+    expect(h.groups[0].count).toBe(3);
     const firstText = h.order.indexOf('sendMessage');
-    const photo = h.order.indexOf('sendPhoto');
-    expect(photo).toBeGreaterThanOrEqual(0);
-    expect(photo).toBeLessThan(firstText);
+    const album = h.order.indexOf('sendMediaGroup');
+    expect(album).toBeGreaterThanOrEqual(0);
+    expect(album).toBeLessThan(firstText);
   });
 
-  it('calls the renderer exactly once regardless of channel count', async () => {
+  it('renders at most four cards regardless of channel count', async () => {
     for (const name of ['chan_one', 'chan_two', 'chan_three', 'chan_four', 'chan_five']) {
       const id = await seedChannel(name);
       await seedNews(id, name, 1, `خبر کانال ${name}.`, 5);
     }
     const h = harness();
-    await runPublishing(env.DB, {
+    const report = await runPublishing(env.DB, {
       token: 'T',
       destination: '@destination',
       fetchImpl: h.fetchImpl,
       browser: h.browser,
       now: new Date(NOW),
     });
-    expect(h.browser.quickAction).toHaveBeenCalledTimes(1);
+    // Five items: four become cards, the fifth rides in the last caption.
+    expect(h.browser.quickAction).toHaveBeenCalledTimes(4);
+    expect(h.groups[0].count).toBe(4);
+    expect(report.image?.selected).toBe(4);
+    expect(report.image?.ticker).toBe(1);
     expect(h.texts).toHaveLength(5);
   });
 
@@ -520,6 +550,7 @@ describe('runPublishing image integration', () => {
     });
     expect(h.browser.quickAction).not.toHaveBeenCalled();
     expect(h.photos).toHaveLength(0);
+    expect(h.groups).toHaveLength(0);
     expect(report.image).toBeUndefined();
     expect(h.texts).toHaveLength(0);
   });
@@ -539,11 +570,13 @@ describe('runPublishing image integration', () => {
 
     expect(report.image?.sent).toBe(false);
     expect(report.image?.error).toBe('render_failed');
+    expect(report.image?.detail).toContain('429');
+    expect(h.groups).toHaveLength(0);
     expect(h.texts).toHaveLength(1);
     expect(report.published).toBe(1);
   });
 
-  it('publishes text digests even when the photo send fails', async () => {
+  it('publishes text digests even when the album send fails', async () => {
     const a = await seedChannel('news_a');
     await seedNews(a, 'news_a', 1, 'خبر مهم.', 5);
 
@@ -593,7 +626,7 @@ describe('runPublishing image integration', () => {
     expect(h.texts[0]).toContain('📡 <i>منبع: @news_a</i>\n📣 <i>@destination</i>');
   });
 
-  it('shows the globally most important news from all channels in one image', async () => {
+  it('shows the globally most important news first, one card each', async () => {
     const a = await seedChannel('news_a');
     const b = await seedChannel('news_b');
     await seedNews(a, 'news_a', 1, 'کوتاه.', 5);
@@ -615,11 +648,15 @@ describe('runPublishing image integration', () => {
       now: new Date(NOW),
     });
 
-    const html = h.browserCalls[0].html;
     expect(report.image?.selected).toBe(2);
     expect(report.image?.channels).toBe(2);
-    // the higher-scored (longer) item must come first
-    expect(html.indexOf('خلاصه‌ای بسیار مفصل‌تر')).toBeLessThan(html.indexOf('کوتاه.'));
+    // Each card is its own render; the higher-scored item is rendered first.
+    expect(h.browserCalls[0].html).toContain('خلاصه‌ای بسیار مفصل‌تر');
+    expect(h.browserCalls[1].html).toContain('کوتاه.');
+    // The first caption opens with the run header; every caption names its source.
+    expect(h.groups[0].captions[0]).toContain('📰 اخبار لحظه‌ای');
+    expect(h.groups[0].captions[0]).toContain('منبع: @news_b');
+    expect(h.groups[0].captions[1]).toContain('منبع: @news_a');
   });
 });
 describe('ticker selection', () => {
@@ -740,5 +777,164 @@ describe('ticker html', () => {
     const html = String((browser.quickAction as ReturnType<typeof vi.fn>).mock.calls[0][1].html);
     expect(html).toContain('class="ticker"');
     expect(html).toContain('خبر پنجم برای نوار عناوین.');
+  });
+});
+
+/* ---------------------------------------------------------------- albums -- */
+
+describe('renderRunAlbum', () => {
+  it('renders one card per top item and keeps the ticker for captions', async () => {
+    const browser = {
+      quickAction: vi.fn(async () => new Response(fakePng(), { status: 200 })),
+    };
+    // Importance order: 5,4,3 then a three-way tie at 2 broken by id.
+    const importances = [5, 4, 3, 2, 2, 2];
+    const items = [1, 2, 3, 4, 5, 6].map((id) =>
+      row({ id, importance: importances[id - 1], summaryText: `خبر شمارهٔ ${id} دربارهٔ بودجهٔ جدید.` })
+    );
+
+    const album = await renderRunAlbum({ browser, items, now: new Date(NOW) });
+
+    expect(album).not.toBeNull();
+    expect(album!.cards).toHaveLength(4); // MAX_IMAGE_ITEMS cap
+    expect(browser.quickAction).toHaveBeenCalledTimes(4);
+    expect(album!.cards[0].item.id).toBe(1); // importance order
+    expect(album!.ticker).toHaveLength(2); // items 5 and 6
+    expect(album!.skipped).toBe(0);
+    expect(album!.browserRunMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('waits between renders so the free-tier Quick Action limit is respected', async () => {
+    const browser = { quickAction: vi.fn(async () => new Response(fakePng(), { status: 200 })) };
+    const waits: number[] = [];
+    const items = [1, 2, 3].map((id) => row({ id, summaryText: `خبر مهم شمارهٔ ${id} دربارهٔ اقتصاد.` }));
+
+    await renderRunAlbum({
+      browser,
+      items,
+      spacingMs: 10_500,
+      sleepImpl: async (ms) => {
+        waits.push(ms);
+      },
+    });
+
+    // Two gaps between three cards, each of the full spacing.
+    expect(waits).toEqual([10_500, 10_500]);
+  });
+
+  it('retries once on a 429 and then stops asking for more cards', async () => {
+    const calls: number[] = [];
+    const browser = {
+      quickAction: vi.fn(async () => {
+        calls.push(1);
+        return new Response('rate limited', { status: 429 });
+      }),
+    };
+    const items = [1, 2, 3].map((id) => row({ id, summaryText: `خبر مهم شمارهٔ ${id} دربارهٔ اقتصاد.` }));
+
+    const album = await renderRunAlbum({
+      browser,
+      items,
+      spacingMs: 5,
+      sleepImpl: async () => {},
+    });
+
+    // First card: two attempts (retry); after the second 429 no more requests.
+    expect(calls).toHaveLength(2);
+    expect(album!.cards).toHaveLength(0);
+    expect(album!.skipped).toBe(3);
+    expect(album!.error).toContain('429');
+  });
+
+  it('skips a failing card but still returns the healthy ones', async () => {
+    let calls = 0;
+    const browser = {
+      quickAction: vi.fn(async () => {
+        calls++;
+        // The second card render returns a non-PNG body: skip just that card.
+        if (calls === 2) return new Response('nope', { status: 200 });
+        return new Response(fakePng(), { status: 200 });
+      }),
+    };
+    const items = [1, 2, 3].map((id) => row({ id, summaryText: `خبر مهم شمارهٔ ${id} دربارهٔ اقتصاد.` }));
+
+    const album = await renderRunAlbum({ browser, items, now: new Date(NOW) });
+
+    expect(album!.cards.map((c) => c.item.id)).toEqual([1, 3]);
+    expect(album!.skipped).toBe(1);
+    expect(album!.error).toContain('validate');
+  });
+
+  it('makes no Browser Run call when there is no news or no binding', async () => {
+    const browser = { quickAction: vi.fn(async () => new Response(fakePng(), { status: 200 })) };
+    expect(await renderRunAlbum({ browser, items: [] })).toBeNull();
+    expect(await renderRunAlbum({ browser: undefined, items: [row({ id: 1 })] })).toBeNull();
+    expect(browser.quickAction).not.toHaveBeenCalled();
+  });
+
+  it('works through the direct screenshot() binding shape as well', async () => {
+    const screenshot = vi.fn(async () => new Response(fakePng(), { status: 200 }));
+    const album = await renderRunAlbum({
+      browser: { screenshot },
+      items: [row({ id: 1, summaryText: 'خبر مهم دربارهٔ اقتصاد کشور.' })],
+      now: new Date(NOW),
+    });
+    expect(album!.cards).toHaveLength(1);
+    expect(screenshot).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('buildAlbumCaptions', () => {
+  const card = (id: number, title: string, channel: string) => ({
+    id,
+    channelUsername: channel,
+    category: 'economy' as const,
+    title,
+    summary: 'خلاصهٔ خبر.',
+  });
+
+  it('puts the run header on the first card and remaining headlines on the last', () => {
+    const now = new Date('2026-10-04T10:00:00.000Z');
+    const captions = buildAlbumCaptions(
+      [card(1, 'بودجهٔ سال آینده تصویب شد', 'news_one'), card(2, 'عرضهٔ سهام جدید', 'news_two')],
+      [
+        { id: 3, channelUsername: 'news_three', text: 'عنوان سوم' },
+        { id: 4, channelUsername: 'news_four', text: 'عنوان چهارم' },
+      ],
+      2,
+      now
+    );
+
+    expect(captions).toHaveLength(2);
+    expect(captions[0]).toContain('📰 اخبار لحظه‌ای');
+    expect(captions[0]).toContain('منبع: @news_one');
+    expect(captions[0]).not.toContain('سایر عناوین');
+    expect(captions[1]).not.toContain('اخبار لحظه‌ای');
+    expect(captions[1]).toContain('منبع: @news_two');
+    expect(captions[1]).toContain('🔎 سایر عناوین: عنوان سوم · عنوان چهارم');
+  });
+
+  it('folds the hidden overflow count into the last caption once', () => {
+    const captions = buildAlbumCaptions([card(1, 'عنوان یک', 'ch')], [], 7, new Date(NOW));
+    expect(captions[0]).toContain(`و ${faDigits(7)} خبر دیگر`);
+    expect(captions[0].match(/و ۷ خبر دیگر/g)).toHaveLength(1);
+  });
+
+  it('keeps captions plain, brief and under the Telegram limit', () => {
+    const longTitle = 'عنوان'.repeat(80);
+    const captions = buildAlbumCaptions(
+      [card(1, longTitle, 'news_one'), card(2, 'عنوان دو', 'news_two')],
+      Array.from({ length: 8 }, (_, i) => ({
+        id: 10 + i,
+        channelUsername: 'ch',
+        text: 'طولانی'.repeat(20),
+      })),
+      0,
+      new Date(NOW)
+    );
+    for (const caption of captions) {
+      expect(caption.length).toBeLessThanOrEqual(1000);
+      expect(caption).not.toContain('<');
+    }
   });
 });

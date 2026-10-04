@@ -584,3 +584,76 @@ describe('rejection helper', () => {
     expect(second).toBe(false);
   });
 });
+/* ------------------------------------------------- rate-limit awareness -- */
+
+describe('ranking rate limits', () => {
+  it('waits once for an account-wide minute limit and retries the SAME model', async () => {
+    await seedModel('free-model-a');
+    const a = await seedChannel('channel_alpha');
+    await seedProcessed(a, 'channel_alpha', 1, 'تیتر یک', 'خلاصهٔ یک.', 30);
+
+    let chatCalls = 0;
+    const waits: number[] = [];
+    const fetchImpl = vi.fn(async () => {
+      chatCalls++;
+      if (chatCalls === 1) {
+        return new Response(
+          JSON.stringify({
+            error: { message: 'Rate limit exceeded: free-models-per-minute.', code: 429 },
+          }),
+          { status: 429 }
+        );
+      }
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: '[{"i":0,"importance":4}]' } }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }) as unknown as typeof fetch;
+
+    const report = await runImportanceRanking(env.DB, {
+      apiKey: 'K',
+      fetchImpl,
+      now: NOW,
+      sleepImpl: async (ms) => {
+        waits.push(ms);
+      },
+    });
+
+    expect(report.error).toBeUndefined();
+    expect(report.ranked).toBe(1);
+    expect(report.model).toBe('free-model-a'); // never rotated
+    expect(chatCalls).toBe(2);
+    expect(waits).toHaveLength(1);
+  });
+
+  it('gives up without rotating when the daily free-tier cap is hit', async () => {
+    await seedModel('free-model-a');
+    const a = await seedChannel('channel_alpha');
+    await seedProcessed(a, 'channel_alpha', 1, 'تیتر یک', 'خلاصهٔ یک.', 30);
+
+    let chatCalls = 0;
+    const fetchImpl = vi.fn(async () => {
+      chatCalls++;
+      return new Response(
+        JSON.stringify({
+          error: { message: 'Rate limit exceeded: free-models-per-day.', code: 429 },
+        }),
+        { status: 429 }
+      );
+    }) as unknown as typeof fetch;
+
+    const report = await runImportanceRanking(env.DB, {
+      apiKey: 'K',
+      fetchImpl,
+      now: NOW,
+      sleepImpl: async () => {},
+    });
+
+    // One request, one safe error, no catalog churn, importance untouched.
+    expect(chatCalls).toBe(1);
+    expect(report.error).toBe('rate_limited_daily');
+    expect(report.ranked).toBe(0);
+    const rows = await env.DB.prepare(`SELECT importance FROM messages`).all<{ importance: number | null }>();
+    expect(rows.results?.[0].importance).toBeNull();
+  });
+});

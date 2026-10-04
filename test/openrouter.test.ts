@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AiError,
   categorize,
+  classifyRateLimit,
   discoverFreeModels,
   OPENROUTER_BASE_URL,
   resolveAiApiKey,
@@ -685,5 +686,95 @@ describe('runSummarization', () => {
     const modelCall = seen.find((s) => s.url.endsWith('/models'))!;
     expect(modelCall.auth).toBeNull();
     expect(seen.some((s) => s.auth === 'Bearer super-secret')).toBe(true);
+  });
+});
+
+/* ------------------------------------------------------ rate limit shapes -- */
+
+describe('rate limit classification', () => {
+  const NOW = Date.parse('2026-10-04T12:00:00.000Z');
+
+  it('recognizes the account-wide free-tier daily cap', () => {
+    const payload = {
+      error: {
+        message: 'Rate limit exceeded: free-models-per-day. Limit: 50/day. Remaining: 0.',
+        code: 429,
+      },
+    };
+    expect(classifyRateLimit(payload, {}, NOW).category).toBe('rate_limited_daily');
+  });
+
+  it('recognizes the account-wide free-tier per-minute cap', () => {
+    const payload = {
+      error: {
+        message: 'Rate limit exceeded: free-models-per-minute. Limit: 20/min. Remaining: 0.',
+        code: 429,
+      },
+    };
+    expect(classifyRateLimit(payload, {}, NOW).category).toBe('rate_limited_minute');
+  });
+
+  it('keeps model/upstream-scoped limits as plain rate_limited', () => {
+    const payload = {
+      error: {
+        message: 'Rate limit exceeded: limit_rpm/some-model/abc',
+        code: 429,
+        metadata: { headers: { 'X-RateLimit-Reset': String(NOW + 30_000) } },
+      },
+    };
+    const info = classifyRateLimit(payload, {}, NOW);
+    expect(info.category).toBe('rate_limited');
+    expect(info.retryAfterMs).toBe(30_000);
+  });
+
+  it('reads a reset from the response headers and treats small values as seconds', () => {
+    const fromHeader = classifyRateLimit({ error: { message: 'slow down' } }, { 'x-ratelimit-reset': String(NOW + 60_000) }, NOW);
+    expect(fromHeader.retryAfterMs).toBe(60_000);
+
+    const retryAfterSeconds = classifyRateLimit({ error: { message: 'slow down' } }, { 'retry-after': '25' }, NOW);
+    expect(retryAfterSeconds.retryAfterMs).toBe(25_000);
+  });
+
+  it('tolerates a non-JSON or empty body without losing the category', () => {
+    expect(classifyRateLimit(null, {}, NOW).category).toBe('rate_limited');
+    expect(classifyRateLimit({}, {}, NOW).category).toBe('rate_limited');
+    expect(classifyRateLimit({ error: {} }, {}, NOW).category).toBe('rate_limited');
+  });
+
+  it('summarizeNews surfaces the daily cap as its own error category', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: { message: 'Rate limit exceeded: free-models-per-day. Limit: 50/day.', code: 429 },
+          }),
+          { status: 429 }
+        )
+    ) as unknown as typeof fetch;
+
+    await expect(
+      summarizeNews({ apiKey: 'k', model: 'x:free', text: 'متن', channelUsername: 'c', messageDate: 'd', fetchImpl })
+    ).rejects.toMatchObject({ category: 'rate_limited_daily' });
+  });
+
+  it('summarizeNews surfaces the per-minute cap with the provider retry hint', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message: 'Rate limit exceeded: free-models-per-minute. Limit: 20/min.',
+              code: 429,
+              metadata: { headers: { 'X-RateLimit-Reset': String(Date.now() + 45_000) } },
+            },
+          }),
+          { status: 429 }
+        )
+    ) as unknown as typeof fetch;
+
+    const expectation = expect(
+      summarizeNews({ apiKey: 'k', model: 'x:free', text: 'متن', channelUsername: 'c', messageDate: 'd', fetchImpl })
+    ).rejects.toMatchObject({ category: 'rate_limited_minute' });
+    await expectation;
   });
 });

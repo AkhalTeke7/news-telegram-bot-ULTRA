@@ -57,10 +57,15 @@ function harness(opts: { png?: ArrayBuffer | null; photoStatus?: number } = {}) 
   const fetchImpl = vi.fn(async (url: unknown, init: RequestInit) => {
     calls.push({ url: String(url), body: init.body ? String(init.body) : undefined });
     const status = opts.photoStatus ?? 200;
+    // A media group answers with an ARRAY of messages; everything else with one.
+    const isGroup = String(url).includes('sendMediaGroup');
+    const result = isGroup
+      ? [{ message_id: 707, date: 1 }, { message_id: 708, date: 1 }]
+      : { message_id: 707, date: 1 };
     return new Response(
       JSON.stringify({
         ok: status < 400,
-        result: { message_id: 707, date: 1 },
+        result,
         description: status < 400 ? undefined : 'Bad Request: chat not found',
       }),
       { status, headers: { 'content-type': 'application/json' } }
@@ -171,8 +176,8 @@ afterEach(() => {
 /* ------------------------------------------------------------- core sender */
 
 describe('sendTestImage', () => {
-  it('renders the REAL pending news and sends only the image', async () => {
-    await seedNews(6); // 4 cards + 2 ticker lines
+  it('renders the REAL pending news and sends only the album', async () => {
+    await seedNews(6); // 4 card images + 2 ticker lines in the last caption
     const h = harness();
 
     const result = await sendTestImage(baseEnv({ BROWSER: h.browser }), {
@@ -181,16 +186,16 @@ describe('sendTestImage', () => {
 
     expect(result).toMatchObject({ ok: true, messageId: 707, cards: 4, ticker: 2 });
 
-    // Exactly one Browser Run request and exactly one Telegram sendPhoto.
-    expect(h.browser.quickAction).toHaveBeenCalledTimes(1);
+    // One Browser Run request per card, and exactly one Telegram album send.
+    expect(h.browser.quickAction).toHaveBeenCalledTimes(4);
     expect(h.calls).toHaveLength(1);
-    expect(h.calls[0].url).toBe(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`);
+    expect(h.calls[0].url).toBe(`https://api.telegram.org/bot${BOT_TOKEN}/sendMediaGroup`);
 
-    // The rendered HTML carries the real summaries, cards and the ticker.
+    // The rendered HTML carries the real summaries (one card per render).
     // (quickAction payload is asserted through the html the browser receives.)
   });
 
-  it('mirrors the test image to Bale when the mirror is configured', async () => {
+  it('mirrors every album card to Bale when the mirror is configured', async () => {
     await seedNews(2);
     const h = harness();
 
@@ -202,8 +207,10 @@ describe('sendTestImage', () => {
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.bale).toEqual({ sent: true });
     const urls = h.calls.map((c) => c.url);
+    // One Telegram album plus one Bale photo per card.
+    expect(urls.filter((u) => u.includes('sendMediaGroup'))).toHaveLength(1);
+    expect(urls.filter((u) => u === 'https://tapi.bale.ai/botbale-token/sendPhoto')).toHaveLength(2);
     // Standard bot base — never the restricted /business/ endpoint.
-    expect(urls).toContain('https://tapi.bale.ai/botbale-token/sendPhoto');
     expect(urls.some((u) => u.includes('/business/'))).toBe(false);
   });
 
@@ -373,10 +380,10 @@ describe('/testimage command and img:test button', () => {
       r
     );
 
-    // One Browser Run request + one sendPhoto, and no sendMessage anywhere.
-    expect(h.browser.quickAction).toHaveBeenCalledTimes(1);
+    // One Browser Run request per card + one sendMediaGroup, and no sendMessage anywhere.
+    expect(h.browser.quickAction).toHaveBeenCalledTimes(4);
     expect(h.calls).toHaveLength(1);
-    expect(h.calls[0].url).toContain('/sendPhoto');
+    expect(h.calls[0].url).toContain('/sendMediaGroup');
 
     // The admin chat gets the report, not the image itself.
     expect(r.sent).toHaveLength(1);
@@ -416,7 +423,7 @@ describe('/testimage command and img:test button', () => {
 
     await handleTelegramUpdate(cb('img:test') as TelegramUpdate, baseEnv({ BROWSER: h.browser }), undefined, r);
 
-    expect(h.browser.quickAction).toHaveBeenCalledTimes(1);
+    expect(h.browser.quickAction).toHaveBeenCalledTimes(3);
     expect(r.edited).toHaveLength(1);
     expect(r.edited[0].text).toContain('✅');
   });

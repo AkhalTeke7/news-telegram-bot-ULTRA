@@ -34,6 +34,18 @@ export interface Env {
   TELEGRAM_WEBHOOK_SECRET?: string;
   /** Optional bot username, used only to recognize /start@botname. */
   TELEGRAM_BOT_USERNAME?: string;
+  /**
+   * Optional tuning: minimum milliseconds between two OpenRouter chat
+   * requests, keeping a run under the free tier's account-wide ~20
+   * requests/minute cap. Default 3200. Plain var, not a secret.
+   */
+  AI_REQUEST_PACE_MS?: string;
+  /**
+   * Optional tuning: milliseconds to wait between two album card renders,
+   * honoring the Browser Run free-tier limit of ~1 Quick Action per 10
+   * seconds. Default 10500. Plain var, not a secret.
+   */
+  IMAGE_RENDER_SPACING_MS?: string;
 }
 
 // Lets `cloudflare:test` type `env` without re-declaring the binding shape.

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { getChatByUsername, getMe, sendMessage, sendRichMessage, TelegramError } from '../src/telegram';
+import {
+  getChatByUsername,
+  getMe,
+  sendMessage,
+  sendMediaGroup,
+  sendRichMessage,
+  TelegramError,
+} from '../src/telegram';
 
 const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -95,5 +102,84 @@ describe('telegram bot api client', () => {
       throw new Error('network down');
     };
     await expect(getMe({ token: 'T', fetchImpl })).rejects.toThrow('network down');
+  });
+});
+
+/* --------------------------------------------------------- media groups -- */
+
+describe('sendMediaGroup', () => {
+  const png = () => {
+    const bytes = new Uint8Array(24);
+    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    return bytes.buffer;
+  };
+
+  it('uploads the album as multipart attachments with plain-text captions', async () => {
+    let seenUrl = '';
+    let seenForm: FormData | undefined;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      seenUrl = String(input);
+      seenForm = (init as RequestInit).body as FormData;
+      return jsonResponse({
+        ok: true,
+        result: [
+          { message_id: 11, date: 1 },
+          { message_id: 12, date: 1 },
+        ],
+      });
+    };
+
+    const messages = await sendMediaGroup({
+      token: 'T',
+      chatId: '@somechannel',
+      media: [
+        { photo: png(), caption: '📰 خبر یک' },
+        { photo: png(), caption: 'خبر دو' },
+      ],
+      fetchImpl,
+      baseUrl: 'https://api.test',
+    });
+
+    expect(seenUrl).toBe('https://api.test/botT/sendMediaGroup');
+    expect(messages.map((m) => m.message_id)).toEqual([11, 12]);
+    const media = JSON.parse(String(seenForm!.get('media'))) as {
+      type: string;
+      media: string;
+      caption?: string;
+    }[];
+    expect(media).toEqual([
+      { type: 'photo', media: 'attach://card0', caption: '📰 خبر یک' },
+      { type: 'photo', media: 'attach://card1', caption: 'خبر دو' },
+    ]);
+    expect(seenForm!.get('card0')).toBeInstanceOf(Blob);
+    expect(seenForm!.get('card1')).toBeInstanceOf(Blob);
+    // Plain captions only — no parse mode that could be rejected.
+    expect(seenForm!.get('parse_mode')).toBeNull();
+  });
+
+  it('refuses albums outside the 2–10 item range', async () => {
+    const fetchImpl: typeof fetch = async () => jsonResponse({ ok: true, result: [] });
+    await expect(
+      sendMediaGroup({ token: 'T', chatId: '@c', media: [{ photo: png() }], fetchImpl })
+    ).rejects.toMatchObject({ name: 'TelegramError' });
+    await expect(
+      sendMediaGroup({
+        token: 'T',
+        chatId: '@c',
+        media: Array.from({ length: 11 }, () => ({ photo: png() })),
+        fetchImpl,
+      })
+    ).rejects.toMatchObject({ name: 'TelegramError' });
+  });
+
+  it('maps a 429 to the rate-limit error with the retry hint', async () => {
+    const fetchImpl: typeof fetch = async () =>
+      jsonResponse(
+        { ok: false, description: 'Too Many Requests', parameters: { retry_after: 12 } },
+        429
+      );
+    await expect(
+      sendMediaGroup({ token: 'T', chatId: '@c', media: [{ photo: png() }, { photo: png() }], fetchImpl })
+    ).rejects.toMatchObject({ name: 'TelegramRateLimitError', retryAfterSeconds: 12 });
   });
 });

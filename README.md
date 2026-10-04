@@ -2,10 +2,10 @@
 
 Persian (Farsi) RTL news bot on Cloudflare Workers. Every two hours it collects news from public
 Telegram channels and configured RSS feeds, filters advertisements, summarizes and ranks
-stories with **free OpenRouter models only**, renders the run as a Vazirmatn HTML
-screenshot with Cloudflare Browser Run (top-4 news as cards plus every remaining headline
-in a one-line ticker), and publishes high-resolution images plus Telegram Rich Messages text
-digests to Telegram and, when configured, mirrors the same rich HTML output to Bale. Digest
+stories with **free OpenRouter models only**, renders the run as a Vazirmatn Liquid Glass
+**album** (one high-resolution card per top story, delivered as a Telegram `sendMediaGroup`
+slideshow) with Cloudflare Browser Run, and publishes the album plus Telegram Rich Messages
+text digests to Telegram and, when configured, mirrors the same output to Bale. Digest
 headlines use the AI topic category for a related emoji, and every story includes its title,
 summary details, and available key points.
 
@@ -21,7 +21,7 @@ Cron (every two hours, at even Tehran hours)
   └─ filter    → local advertisement filter      → filter_status    (no AI, no network)
   └─ summarize → POST https://openrouter.ai/api/v1/chat/completions → summary_text + title
   └─ rank      → one global AI comparison        → importance (1–5)
-  └─ publish   → Browser Run HTML screenshot + Telegram/Bale sendPhoto (important news)
+  └─ publish   → Browser Run card screenshots + Telegram sendMediaGroup album (top news)
              └─ text digest → Telegram sendRichMessage / Bale sendMessage
 ```
 
@@ -145,12 +145,19 @@ npx wrangler secret put TELEGRAM_WEBHOOK_SECRET        # X-Telegram-Bot-Api-Secr
 `-1001234567890`. It is read only in `src/publisher.ts` and is never returned by an API,
 shown in the UI, or written to the database.
 
+Two optional tuning knobs exist as plain vars (set them in `wrangler.json` under `vars` or
+in the dashboard — they are not secrets): `AI_REQUEST_PACE_MS` (default `3200`) spaces
+OpenRouter chat requests so a run stays under the free tier's account-wide ~20
+requests/minute cap, and `IMAGE_RENDER_SPACING_MS` (default `10500`) spaces album card
+renders so a run stays under the Browser Run free-tier limit of ~1 Quick Action per 10
+seconds. Both accept milliseconds; `0` disables the spacing.
+
 ## Bale delivery
 
 Bale delivery mirrors the Telegram output through the official Bale Business Bot API at
-`https://tapi.bale.ai/business/bot`: the single run image (`sendPhoto`, PNG multipart)
-and every **delivered** text digest part (`sendMessage`). Add the Bale bot to the
-destination channel with permission to post, then configure `BALE_BOT_TOKEN` and
+`https://tapi.bale.ai/business/bot`: every album card (`sendPhoto`, PNG multipart, with
+its caption) and every **delivered** text digest part (`sendMessage`). Add the Bale bot
+to the destination channel with permission to post, then configure `BALE_BOT_TOKEN` and
 `BALE_DESTINATION_CHANNEL` (both are required; without them publishing stays
 Telegram-only).
 
@@ -199,9 +206,10 @@ long to fit alone is trimmed deterministically so the footer always survives.
 
 Per-run safety bound: publishing spends whatever is left of the Workers **Free** limit of
 50 subrequests per invocation, after reserving room for what earlier stages need — one
-fetch per enabled source channel for collection, up to 20 for summarization, and
-occasionally one for the model list. `publishMessageBudget(enabledChannels)` in
-`src/publisher.ts` computes it and caps it at `MAX_MESSAGES_PER_RUN = 40`. There is **no**
+fetch per enabled source channel for collection, up to 20 for summarization, one for the
+model list, and five for the run album (four Browser Run renders plus one
+`sendMediaGroup`). `publishMessageBudget(enabledChannels)` in `src/publisher.ts` computes
+it and caps it at `MAX_MESSAGES_PER_RUN = 40`. There is **no**
 per-channel or global row cap, so current-window news is never silently postponed. When the
 bound is reached the remaining rows are recorded with the explicit `run_limit` category and
 stay unpublished, so the next run continues with them in the same configured order (verified:
@@ -212,7 +220,7 @@ Items are marked `published_at` (with `telegram_destination_message_id`) only af
 confirms each delivered message, so a failed or rate-limited part is retried next run
 without duplicating what already went out.
 
-## AI importance and channel image
+## AI importance and the news album (slideshow)
 
 After summaries are created, one global OpenRouter ranking request compares eligible news
 across all enabled source channels and stores an `importance` score from 1 to 5. Score 1
@@ -220,21 +228,28 @@ means the item is not important enough for the visual; scores 2–5 are eligible
 ranking is persisted in D1, so image selection is deterministic and independent of
 channel order. Legacy rows with a null score remain eligible as a migration fallback.
 
-When `BROWSER` is configured, publishing makes one Cloudflare Browser Run screenshot
-request per pipeline run. The Worker builds a Persian RTL HTML/CSS frame with the top
-four eligible items as cards (titles, summaries, source labels) and a horizontal
-**ticker strip** below them carrying every remaining headline of the run — one brief
-single-line entry per item, truncated at a word boundary, with a trailing
-«و n خبر دیگر» line when more than eight remain. The footer credits every channel
-visible in the image, cards and ticker alike. Browser Run rasterizes it at 2560×1440 with
-high-contrast, larger card typography so the summary details remain readable when Telegram scales
-the photo down;
-the PNG is immediately sent to the destination with Telegram `sendPhoto` (and mirrored
-to Bale when configured) and is not stored in D1 or R2. Image failure is isolated, so
-the ordinary per-channel text digests still publish.
+When `BROWSER` is configured, publishing renders the run as a real Telegram **album**:
+the Worker builds one Persian RTL Liquid Glass HTML card per top news item (at most
+four, chosen by importance), Browser Run rasterizes each at 2560×1440, and all cards are
+delivered together through Telegram `sendMediaGroup` — a swipeable slideshow in the
+channel. A single card is sent as an ordinary `sendPhoto`, because a media group needs
+at least two items. Captions are plain text (no parse mode, so nothing can be rejected):
+the first card carries the run header («اخبار لحظه‌ای» + Tehran date/time), every card
+names its source channel, and the last card lists the remaining headlines
+(«سایر عناوین» + «و n خبر دیگر» when more than eight remain) — the same information
+the old ticker strip carried.
+
+Browser Run limits are respected explicitly: renders are spaced by
+`IMAGE_RENDER_SPACING_MS` (default 10.5s, matching the Workers Free plan's ~1 Quick
+Action per 10 seconds), a single HTTP 429 is retried once, and after a second 429 the
+remaining cards are skipped instead of hammering — the album degrades to fewer cards
+rather than failing the run. PNGs are never stored in D1 or R2; they exist only for the
+duration of the send. Album failure is isolated, so the ordinary per-channel text
+digests still publish. When configured, every album card is mirrored to Bale
+(`sendPhoto`) as well.
 
 
-### Rich text transport and slideshow compatibility
+### Rich text transport
 
 The text digest is built as escaped HTML and passed through the zero-runtime-dependency
 [`tg-rich-messages`](https://github.com/vdistortion/tg-rich-messages) builder. Telegram receives
@@ -244,13 +259,29 @@ Rich Messages method, the publisher makes one compatibility fallback to ordinary
 `sendMessage` with `parse_mode: HTML`; network, rate-limit, and content errors are never
 silently retried.
 
-The library's `<tg-slideshow>` block is URL-backed media, while this Worker's Browser Run
-binding returns an ephemeral PNG buffer and the current publishing budget intentionally allows
-one render per run. Therefore the current safe presentation is one high-resolution run image
-plus the complete rich text digest, rather than pretending a local buffer is a public slideshow
-URL or making several Browser Run calls inside the per-channel loop. A real Telegram album can
-be added once the deployment has durable public image URLs (or an explicitly expanded Browser
-Run budget) and can then use `sendMediaGroup` without dropping any digest details.
+The slideshow is the album above: `sendMediaGroup` with multipart-uploaded PNGs, so no
+public image URLs are needed. The library's URL-backed `<tg-slideshow>` block is not
+used for the news images.
+
+## OpenRouter free-tier rate limits
+
+OpenRouter's free models are capped **per account**, not per model: roughly 20 requests
+per minute and 50 requests per day (1000/day once the account has ever held $10 of
+credits). The pipeline treats each shape differently, and the run report names the
+exact category:
+
+* **Model/upstream-scoped 429** (`rate_limited`) → the model is abandoned and the run
+  rotates to the next proven-free model, exactly as before.
+* **Account-wide per-minute cap** (`rate_limited_minute`) → rotation is pointless, so
+  the run waits for the provider's reset (bounded to 30s, retry once per message, at
+  most 90s of waiting per run) and retries the SAME model; afterwards it keeps pacing.
+* **Account-wide daily cap** (`rate_limited_daily`) → no free model can answer until
+  the next UTC day, so the run stops immediately instead of burning the catalog. The
+  next runs pick up the unsummarized messages.
+
+On top of that, chat requests are spaced by `AI_REQUEST_PACE_MS` (default 3.2s) so a
+healthy run never bursts past the 20-requests/minute cap in the first place. Both knobs
+are plain vars (not secrets) and can be tuned or zeroed per deployment.
 
 ## Advertisement filter
 

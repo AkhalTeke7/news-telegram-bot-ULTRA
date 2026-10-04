@@ -635,6 +635,35 @@ it('registers the manual pipeline with the execution context instead of firing a
     expect(renderPipelineResult({ ...base, status: 'partial' })).toContain('⚠️ پردازش با خطاهای جزئی تمام شد.');
     expect(renderPipelineResult({ ...base, status: 'failed' })).toContain('❌ پردازش با خطا مواجه شد.');
   });
+
+  it('explains WHY each stage failed, including the account-wide rate caps', () => {
+    const text = renderPipelineResult({
+      status: 'partial',
+      ranAt: '2026-01-15T20:30:00.000Z',
+      collection: { inserted: 7 },
+      filteredAdvertisements: 0,
+      summarization: {
+        summarized: 2,
+        model: 'dots-studio/dots-3-note-preview:free',
+        failureCategories: { rate_limited_daily: 15, network: 3 },
+      },
+      ranking: { important: 0, ranked: 0, error: 'rate_limited_daily' },
+      publishing: {
+        published: 0,
+        rateLimited: false,
+        failureCategories: { invalid_source_url: 4, telegram_error: 2 },
+        bale: { sent: 0, failed: 0 },
+        image: { sent: false, cards: 0, ticker: 0, reason: 'render_failed', detail: 'browser_run: HTTP 429' },
+      },
+      itemFailures: 24,
+      durationMs: 38_000,
+    });
+
+    expect(text).toContain('محدودیت روزانهٔ درخواست رایگان (سطح حساب) (15)');
+    expect(text).toContain('رتبه‌بندی: ناموفق (محدودیت روزانهٔ درخواست رایگان (سطح حساب))');
+    expect(text).toContain('علت خطای انتشار: لینک منبع نامعتبر (4)، خطای تلگرام (2)');
+    expect(text).toContain('تصویر خبری: ارسال نشد — ساخت تصویر ناموفق بود (browser_run: HTTP 429)');
+  });
 });
 
 /* -------------------------------------------------------- shared pipeline */

@@ -24,3 +24,10 @@ TELEGRAM_ADMIN_USER_ID=""
 # Generate e.g.: openssl rand -hex 24
 # For the deployed Worker use: npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
 TELEGRAM_WEBHOOK_SECRET=""
+# Optional tuning (plain vars, not secrets). Both are milliseconds.
+# Minimum spacing between two OpenRouter chat requests, keeping one run under
+# the free tier's account-wide ~20 requests/minute cap. Default 3200.
+AI_REQUEST_PACE_MS=""
+# Wait between two album card renders, honoring the Browser Run free-tier
+# limit of ~1 Quick Action per 10 seconds. Default 10500.
+IMAGE_RENDER_SPACING_MS=""

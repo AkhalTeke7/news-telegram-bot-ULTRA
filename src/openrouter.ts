@@ -37,19 +37,110 @@ export type AiErrorCategory =
   | 'config_missing'
   | 'no_free_model'
   | 'rate_limited'
+  | 'rate_limited_minute'
+  | 'rate_limited_daily'
   | 'provider_error'
   | 'invalid_response'
   | 'timeout'
   | 'network';
 
 export class AiError extends Error {
+  /**
+   * When the provider said when its rate-limit window resets: milliseconds
+   * from "now" until the retry may go out. Optional; callers must bound it.
+   */
+  readonly retryAfterMs?: number;
+
   constructor(
     readonly category: AiErrorCategory,
-    message: string
+    message: string,
+    retryAfterMs?: number
   ) {
     super(message);
     this.name = 'AiError';
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+/**
+ * The three rate-limit shapes OpenRouter returns, and how the pipeline must
+ * react to each:
+ *
+ *  - `rate_limited`        — model/upstream-scoped (e.g. `limit_rpm/<model>`).
+ *                            Rotating to another model IS the right response.
+ *  - `rate_limited_minute` — ACCOUNT-wide `free-models-per-minute` (≈20/min).
+ *                            Every free model shares it, so rotating is
+ *                            useless: wait for the reset and retry the same
+ *                            model, and pace later requests.
+ *  - `rate_limited_daily`  — ACCOUNT-wide `free-models-per-day` (≈50/day).
+ *                            Nothing helps until the next UTC day: stop the
+ *                            run immediately instead of burning the catalog.
+ */
+export interface RateLimitClassification {
+  category: 'rate_limited' | 'rate_limited_minute' | 'rate_limited_daily';
+  retryAfterMs?: number;
+}
+
+/** Reads an ABSOLUTE reset timestamp (epoch ms or s) as a delta from now. */
+function resetEpochDeltaMs(value: string | null | undefined, now: number): number | undefined {
+  if (!value) return undefined;
+  const raw = Number(value);
+  if (!Number.isFinite(raw) || raw <= 0) return undefined;
+  // Epoch milliseconds are ~1.6e12; unix seconds are ~1.7e9.
+  const ms = raw < 1e11 ? raw * 1000 : raw;
+  const delta = ms - now;
+  return delta > 0 ? Math.min(delta, 24 * 60 * 60 * 1000) : undefined;
+}
+
+/** Reads a RELATIVE `retry-after` header, which is always seconds. */
+function retryAfterHeaderMs(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined;
+  return Math.min(seconds * 1000, 24 * 60 * 60 * 1000);
+}
+
+/**
+ * Classifies a 429 response from its JSON body (best effort) and headers.
+ * Only provider limit tokens are inspected — never credentials — and the
+ * returned category/message carry no raw provider text.
+ */
+export function classifyRateLimit(
+  payload: unknown,
+  headers: { 'x-ratelimit-reset'?: string | null; 'retry-after'?: string | null },
+  now = Date.now()
+): RateLimitClassification {
+  let messageText = '';
+  if (payload && typeof payload === 'object') {
+    const error = (payload as Record<string, unknown>).error;
+    if (error && typeof error === 'object') {
+      const message = (error as Record<string, unknown>).message;
+      if (typeof message === 'string') messageText = message;
+    }
+  }
+
+  let retryAfterMs = retryAfterHeaderMs(headers['retry-after']);
+  if (payload && typeof payload === 'object') {
+    const error = (payload as Record<string, unknown>).error as Record<string, unknown> | undefined;
+    const metadata = error?.metadata as Record<string, unknown> | undefined;
+    const metaHeaders = metadata?.headers as Record<string, unknown> | undefined;
+    if (metaHeaders && typeof metaHeaders === 'object') {
+      const reset =
+        (typeof metaHeaders['X-RateLimit-Reset'] === 'string' ? metaHeaders['X-RateLimit-Reset'] : undefined) ??
+        (typeof metaHeaders['x-ratelimit-reset'] === 'string' ? metaHeaders['x-ratelimit-reset'] : undefined);
+      retryAfterMs = resetEpochDeltaMs(reset, now) ?? retryAfterMs;
+    }
+  }
+  // The HTTP response header wins only when nothing else said anything.
+  retryAfterMs = retryAfterMs ?? resetEpochDeltaMs(headers['x-ratelimit-reset'], now);
+
+  if (/free-models-per-day/i.test(messageText)) {
+    return { category: 'rate_limited_daily', retryAfterMs };
+  }
+  if (/free-models-per-minute/i.test(messageText)) {
+    return { category: 'rate_limited_minute', retryAfterMs };
+  }
+  return { category: 'rate_limited', retryAfterMs };
 }
 
 export interface FetchOptions {
@@ -683,7 +774,21 @@ async function complete(
     throw new AiError('network', `AI request failed: ${message(e)}`);
   }
 
-  if (res.status === 429) throw new AiError('rate_limited', 'Provider rate limit reached.');
+  if (res.status === 429) {
+    // The body says WHICH limit tripped: an account-wide free-tier cap must
+    // not be treated like a model-specific one (see classifyRateLimit).
+    const body = await res.json().catch(() => null);
+    const limit = classifyRateLimit(body, {
+      'x-ratelimit-reset': res.headers.get('x-ratelimit-reset'),
+      'retry-after': res.headers.get('retry-after'),
+    });
+    const messages: Record<RateLimitClassification['category'], string> = {
+      rate_limited: 'Provider rate limit reached.',
+      rate_limited_minute: 'Free-model per-minute limit reached (account-wide).',
+      rate_limited_daily: 'Free-model daily limit reached (account-wide).',
+    };
+    throw new AiError(limit.category, messages[limit.category], limit.retryAfterMs);
+  }
   if (res.status === 401 || res.status === 403) {
     throw new AiError('provider_error', `Provider rejected credentials (HTTP ${res.status}).`);
   }

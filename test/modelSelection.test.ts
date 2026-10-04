@@ -368,3 +368,148 @@ describe('run report diagnostics', () => {
     expect(text).toContain('apodex/apodex-1.1-mini:free');
   });
 });
+
+/* --------------------------------------------- account-wide rate limits -- */
+
+const rateLimitBody = (kind: string) => ({
+  error: { message: `Rate limit exceeded: ${kind}. Limit: 20/min.`, code: 429 },
+});
+
+describe('summarizer account-wide rate limits', () => {
+  beforeEach(reset);
+
+  it('waits for a per-minute limit and retries the SAME model instead of rotating', async () => {
+    const channelId = await seedChannel('testchan');
+    for (let i = 1; i <= 3; i++) await seedMessage(channelId, i);
+    await seedCatalog(['alpha-free', 'beta-free']);
+    await setSetting(env.DB, KEY_SELECTED_MODEL, 'alpha-free');
+
+    const waits: number[] = [];
+    const usedModels: string[] = [];
+    let chatCalls = 0;
+    const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (String(url).endsWith('/models')) {
+        return new Response(JSON.stringify({ data: [{ id: 'alpha-free' }, { id: 'beta-free' }] }));
+      }
+      chatCalls++;
+      const body = JSON.parse(String(init?.body ?? '{}')) as { model: string };
+      usedModels.push(body.model);
+      // First chat call trips the account-wide per-minute cap, then it clears.
+      if (chatCalls === 1) {
+        return new Response(JSON.stringify(rateLimitBody('free-models-per-minute')), { status: 429 });
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  title: 'عنوان',
+                  summary: 'خلاصهٔ معتبر خبر.',
+                  is_news: true,
+                  is_advertisement: false,
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+
+    const report = await runSummarization(env.DB, {
+      apiKey: 'k',
+      fetchImpl,
+      now: NOW,
+      sleepImpl: async (ms) => {
+        waits.push(ms);
+      },
+    });
+
+    // No rotation: the same model served the retry and every later message.
+    expect(report.abandonedModels).toEqual([]);
+    expect(report.model).toBe('alpha-free');
+    expect(report.summarized).toBe(3);
+    expect(usedModels.every((m) => m === 'alpha-free')).toBe(true);
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toBeGreaterThan(0);
+    expect(waits[0]).toBeLessThanOrEqual(30_000);
+  });
+
+  it('aborts the run immediately when the daily free-tier cap is hit', async () => {
+    const channelId = await seedChannel('testchan');
+    for (let i = 1; i <= 4; i++) await seedMessage(channelId, i);
+    await seedCatalog(['alpha-free', 'beta-free', 'gamma-free']);
+    await setSetting(env.DB, KEY_SELECTED_MODEL, 'alpha-free');
+
+    let chatCalls = 0;
+    const fetchImpl = vi.fn(async (url: unknown) => {
+      if (String(url).endsWith('/models')) {
+        return new Response(JSON.stringify({ data: [{ id: 'alpha-free' }, { id: 'beta-free' }] }));
+      }
+      chatCalls++;
+      return new Response(JSON.stringify(rateLimitBody('free-models-per-day')), { status: 429 });
+    }) as unknown as typeof fetch;
+
+    const report = await runSummarization(env.DB, {
+      apiKey: 'k',
+      fetchImpl,
+      now: NOW,
+      sleepImpl: async () => {},
+    });
+
+    // Exactly one request: rotating to other free models cannot help because
+    // the cap is account-wide, and burning the catalog is the old failure mode.
+    expect(chatCalls).toBe(1);
+    expect(report.abandonedModels).toEqual([]);
+    expect(report.summarized).toBe(0);
+    expect(report.failed).toHaveLength(4);
+    expect(report.failureCategories.rate_limited_daily).toBe(4);
+  });
+
+  it('paces chat requests so one run stays under the free-tier requests/minute cap', async () => {
+    const channelId = await seedChannel('testchan');
+    for (let i = 1; i <= 3; i++) await seedMessage(channelId, i);
+    await seedCatalog(['alpha-free']);
+
+    const waits: number[] = [];
+    const fetchImpl = vi.fn(async (url: unknown) => {
+      if (String(url).endsWith('/models')) {
+        return new Response(JSON.stringify({ data: [{ id: 'alpha-free' }] }));
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  title: 'عنوان',
+                  summary: 'خلاصهٔ معتبر خبر.',
+                  is_news: true,
+                  is_advertisement: false,
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+
+    const report = await runSummarization(env.DB, {
+      apiKey: 'k',
+      fetchImpl,
+      now: NOW,
+      paceMs: 5_000,
+      sleepImpl: async (ms) => {
+        waits.push(ms);
+      },
+    });
+
+    expect(report.summarized).toBe(3);
+    // A wait before every request after the first; the mock answers instantly,
+    // so each wait is (almost) the full pace interval.
+    expect(waits).toHaveLength(2);
+    for (const wait of waits) expect(wait).toBeGreaterThanOrEqual(4_900);
+  });
+});

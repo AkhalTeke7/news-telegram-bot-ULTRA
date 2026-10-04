@@ -1,26 +1,23 @@
 /**
- * One Liquid Glass news image per pipeline run.
+ * Liquid Glass news images for pipeline runs.
  *
- * Purpose: a single high-resolution "front page" for the whole run, rendered through
- * Cloudflare Browser Run, showing the most important news across ALL enabled
- * source channels.
+ * Purpose: a per-run ALBUM (Telegram `sendMediaGroup` slideshow) — one
+ * high-resolution card image per top news item, rendered through Cloudflare
+ * Browser Run, showing the most important news across ALL enabled source
+ * channels. The remaining headlines ride along as the last card's caption.
  *
  * Design constraints this module exists to satisfy:
- *  - AT MOST ONE Browser Run request per pipeline execution. Callers must
- *    invoke `renderRunImage()` once, outside any per-channel loop. Free-plan
- *    Quick Actions are rate limited to roughly one request per 10s, so a
- *    per-channel image would both break the budget and hit 429.
+ *  - at most `MAX_IMAGE_ITEMS` Browser Run requests per pipeline execution,
+ *    spaced by `DEFAULT_IMAGE_RENDER_SPACING_MS`, because the Workers Free
+ *    plan allows roughly one Quick Action every 10 seconds. A 429 from
+ *    Browser Run skips the remaining cards instead of hammering.
  *  - Rasterization happens inside Browser Run, never in this Worker: no WASM,
  *    no canvas, no local PNG encoding. The Worker only builds an HTML string.
- *  - The image is never persisted. The PNG exists as one local variable for the
- *    duration of the send and is dropped immediately afterwards; nothing is
- *    written to D1, R2 or any other store.
- *  - The image carries ALL of the run's news: the top four items as cards and
- *    every remaining headline in a horizontal ticker strip below them, one
- *    brief single-line entry per item.
- *
- * The image is completely independent of the per-channel text digests: those
- * are still built and sent by `runPublishing()` exactly as before.
+ *  - The images are never persisted. Each PNG exists as one local variable
+ *    for the duration of the send and is dropped immediately afterwards;
+ *    nothing is written to D1, R2 or any other store.
+ *  - The album is completely independent of the per-channel text digests:
+ *    those are still built and sent by `runPublishing()` exactly as before.
  */
 
 import type { PublishableMessage } from './publisher';
@@ -45,9 +42,34 @@ const CARD_TITLE_MAX_CHARS = 90;
 export const MAX_TICKER_ITEMS = 8;
 export const TICKER_MAX_CHARS = 72;
 
-/** The Browser Run binding, structurally typed so tests can supply a fake. */
+/**
+ * The Browser Run binding, structurally typed so tests can supply a fake.
+ *
+ * Two call shapes are accepted because the Workers binding has been exposed
+ * under different names across its lifetime: the Quick Action form
+ * (`quickAction('screenshot', …)`) and the direct form (`screenshot(…)`).
+ * Whichever the deployment exposes is used; when neither exists the render
+ * fails with a typed error instead of a silent "render_failed" mystery.
+ */
 export interface BrowserBinding {
-  quickAction(action: 'screenshot', payload: Record<string, unknown>): Promise<Response>;
+  quickAction?(action: 'screenshot', payload: Record<string, unknown>): Promise<Response>;
+  screenshot?(payload: Record<string, unknown>): Promise<Response>;
+}
+
+/**
+ * Dispatches one screenshot request through whichever binding method exists.
+ * All renderers go through here, so the dispatch lives in exactly one place.
+ */
+export async function browserScreenshot(
+  browser: BrowserBinding,
+  payload: Record<string, unknown>
+): Promise<Response> {
+  if (typeof browser.quickAction === 'function') return browser.quickAction('screenshot', payload);
+  if (typeof browser.screenshot === 'function') return browser.screenshot(payload);
+  throw new NewsImageError(
+    'browser_run',
+    'Browser Run binding exposes no screenshot method (quickAction/screenshot).'
+  );
 }
 
 export interface ImageNewsItem {
@@ -511,13 +533,14 @@ export async function renderRunImage(
 
   let response: Response;
   try {
-    response = await opts.browser.quickAction('screenshot', {
+    response = await browserScreenshot(opts.browser, {
       html,
       viewport: { width: IMAGE_WIDTH, height: IMAGE_HEIGHT, deviceScaleFactor: 1 },
       screenshotOptions: { type: 'png', fullPage: false, captureBeyondViewport: false },
       gotoOptions: { waitUntil: 'networkidle0', timeout: opts.timeoutMs ?? 20_000 },
     });
   } catch (e) {
+    if (e instanceof NewsImageError) throw e;
     throw new NewsImageError('browser_run', e instanceof Error ? e.message : String(e));
   }
 
@@ -540,4 +563,233 @@ export async function renderRunImage(
     items: selected,
     tickerCount: ticker.items.length,
   };
+}
+
+/* ------------------------------------------------------------- the album -- */
+
+/**
+ * Spacing between two Browser Run screenshot requests. The Workers Free plan
+ * allows about one Quick Action per 10 seconds; the pipeline passes this value
+ * (configurable via IMAGE_RENDER_SPACING_MS) so a 4-card album never trips it.
+ */
+export const DEFAULT_IMAGE_RENDER_SPACING_MS = 10_500;
+/** One retry when a screenshot comes back HTTP 429 (Quick Action rate limit). */
+export const SCREENSHOT_RETRIES = 2;
+
+export const sleepMs = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+
+/** One fully rendered card of the album. */
+export interface RenderedCardImage {
+  item: ImageNewsItem;
+  png: ArrayBuffer;
+  bytes: number;
+  width: number;
+  height: number;
+}
+
+export interface RenderedAlbum {
+  /** Successfully rendered cards, in display (importance) order. */
+  cards: RenderedCardImage[];
+  /** Remaining headlines for the last card's caption (overflow line included). */
+  ticker: TickerNewsItem[];
+  /** Headlines beyond MAX_TICKER_ITEMS (already folded into the last line). */
+  hidden: number;
+  /** Total time spent inside Browser Run, excluding waits. */
+  browserRunMs: number;
+  /** Selected cards that could not be rendered; the album degrades gracefully. */
+  skipped: number;
+  /** Short, safe reason for the first failure (stage/status only). */
+  error?: string;
+}
+
+export interface RenderAlbumOptions {
+  browser: BrowserBinding | undefined;
+  items: readonly PublishableMessage[];
+  now?: Date;
+  timeoutMs?: number;
+  /** Wait between two screenshot requests; 0 = no spacing (tests). */
+  spacingMs?: number;
+  /** Injectable wait, so tests never sleep for real. */
+  sleepImpl?: (ms: number) => Promise<void>;
+}
+
+/** Short, secret-free reason for a render failure (stage + status only). */
+function describeRenderError(error: unknown): string {
+  if (error instanceof NewsImageError) {
+    return `${error.stage}: ${error.message}`.slice(0, 120);
+  }
+  const name = error instanceof Error ? error.name : 'Error';
+  const text = error instanceof Error ? error.message : String(error);
+  return `${name}: ${text}`.slice(0, 120);
+}
+
+/**
+ * Renders THE run album: one full-size Liquid Glass card per top news item.
+ *
+ * One Browser Run screenshot per card, spaced so the free-tier Quick Action
+ * limit (≈1 request / 10s) is respected. Failures degrade instead of failing
+ * the run: a card that cannot be rendered is skipped, and once Browser Run
+ * answers 429 twice the remaining cards are skipped without further requests.
+ * Returns null when there is nothing worth showing or no binding configured —
+ * in both cases no Browser Run request is made at all.
+ */
+export async function renderRunAlbum(opts: RenderAlbumOptions): Promise<RenderedAlbum | null> {
+  const selected = selectTopNews(opts.items);
+  if (selected.length === 0) return null;
+  if (!opts.browser) return null;
+
+  const tickerSelection = selectTickerNews(opts.items, new Set(selected.map((s) => s.id)));
+  const ticker: TickerNewsItem[] = [...tickerSelection.items];
+  if (tickerSelection.hidden > 0) {
+    ticker.push({
+      id: 0,
+      channelUsername: '',
+      text: `و ${faDigits(tickerSelection.hidden)} خبر دیگر`,
+      more: true,
+    });
+  }
+
+  const sleepImpl = opts.sleepImpl ?? sleepMs;
+  const spacing = opts.spacingMs ?? 0;
+  const cards: RenderedCardImage[] = [];
+  let browserRunMs = 0;
+  let skipped = 0;
+  let firstError: string | undefined;
+  /** Set once Browser Run itself rate limits us: stop asking for more cards. */
+  let rateLimited = false;
+
+  for (let i = 0; i < selected.length; i++) {
+    if (rateLimited) {
+      skipped++;
+      continue;
+    }
+    if (i > 0) await sleepImpl(spacing);
+
+    const item = selected[i];
+    const html = buildImageHtml(buildRunFrame([item], opts.now ?? new Date(), []));
+    let rendered: RenderedCardImage | null = null;
+
+    for (let attempt = 1; attempt <= SCREENSHOT_RETRIES && !rendered; attempt++) {
+      const started = Date.now();
+      try {
+        const response = await browserScreenshot(opts.browser, {
+          html,
+          viewport: { width: IMAGE_WIDTH, height: IMAGE_HEIGHT, deviceScaleFactor: 1 },
+          screenshotOptions: { type: 'png', fullPage: false, captureBeyondViewport: false },
+          gotoOptions: { waitUntil: 'networkidle0', timeout: opts.timeoutMs ?? 20_000 },
+        });
+        const png = await response.arrayBuffer();
+        const size = readPngSize(png);
+        browserRunMs += Date.now() - started;
+        if (response.status === 429) {
+          firstError ??= 'browser_run: HTTP 429';
+          // Quick Actions are ~1/10s on the free plan: wait once and retry.
+          // The wait reuses the caller's spacing so tests (spacing 0) stay fast.
+          if (attempt < SCREENSHOT_RETRIES && spacing > 0) {
+            await sleepImpl(spacing);
+            continue;
+          }
+          rateLimited = true;
+          break;
+        }
+        if (!response.ok || !size) {
+          throw new NewsImageError(
+            'validate',
+            `Browser Run did not return a PNG (status ${response.status})`
+          );
+        }
+        rendered = {
+          item,
+          png,
+          bytes: png.byteLength,
+          width: size.width,
+          height: size.height,
+        };
+      } catch (error) {
+        browserRunMs += Date.now() - started;
+        if (error instanceof NewsImageError) {
+          firstError ??= describeRenderError(error);
+          break; // not transient — skip this card
+        }
+        firstError ??= describeRenderError(error);
+        break;
+      }
+    }
+
+    if (rendered) cards.push(rendered);
+    else skipped++;
+  }
+
+  return {
+    cards,
+    ticker,
+    hidden: tickerSelection.hidden,
+    browserRunMs,
+    skipped,
+    ...(firstError ? { error: firstError } : {}),
+  };
+}
+
+/** Telegram caption limit, kept below the 1024 hard limit for headroom. */
+export const MAX_CAPTION_CHARS = 1000;
+
+/** Strips control characters so a caption is always plain, single-line-safe text. */
+function cleanCaptionLine(text: string): string {
+  return text
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Builds the plain-text caption of every album card.
+ *
+ * Layout (no HTML, so neither Telegram nor Bale can reject the markup):
+ *
+ *   card 1:   📰 اخبار لحظه‌ای — ۱۴۰۵/۰۷/۱۲ ساعت ۱۴:۳۰ تهران
+ *             🏛️ <headline>
+ *             📡 منبع: @channel
+ *   card N:   🏛️ <headline>
+ *             📡 منبع: @channel
+ *             🔎 سایر عناوین: … · … · و n خبر دیگر
+ *
+ * The run header lands on the first card, the remaining headlines on the last,
+ * so the album carries the whole run exactly like the old ticker strip did.
+ */
+export function buildAlbumCaptions(
+  items: readonly ImageNewsItem[],
+  ticker: readonly TickerNewsItem[],
+  hidden: number,
+  now: Date
+): string[] {
+  const stamp = formatTehranDateTime(now) ?? '';
+  const overflow =
+    hidden > 0
+      ? ticker.some((t) => t.more)
+        ? ''
+        : `و ${faDigits(hidden)} خبر دیگر`
+      : '';
+
+  return items.map((item, index) => {
+    const topic = topicPresentation(item.category, `${item.title} ${item.summary}`);
+    const lines: string[] = [];
+    if (index === 0 && stamp) lines.push(`📰 اخبار لحظه‌ای — ${stamp} تهران`);
+    lines.push(`${topic.emoji} ${cleanCaptionLine(item.title)}`);
+    lines.push(`📡 منبع: ${channelLabel(item.channelUsername)}`);
+
+    if (index === items.length - 1) {
+      const headlines = ticker.map((t) => cleanCaptionLine(t.text)).filter(Boolean);
+      if (headlines.length > 0) {
+        lines.push(`🔎 سایر عناوین: ${headlines.join(' · ')}`);
+      } else if (overflow) {
+        lines.push(`🔎 ${overflow}`);
+      }
+    }
+
+    const caption = lines.join('\n');
+    return caption.length > MAX_CAPTION_CHARS
+      ? `${caption.slice(0, MAX_CAPTION_CHARS - 1).trimEnd()}…`
+      : caption;
+  });
 }

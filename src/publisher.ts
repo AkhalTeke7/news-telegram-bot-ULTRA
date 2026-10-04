@@ -15,11 +15,17 @@
 import { block, doc, type InputRichMessage } from 'tg-rich-messages';
 import { listChannels } from './channels';
 import { baleSendMessage, baleSendPhoto } from './bale';
-import { renderRunImage, type BrowserBinding } from './newsImage';
+import {
+  buildAlbumCaptions,
+  renderRunAlbum,
+  type BrowserBinding,
+  type RenderedCardImage,
+} from './newsImage';
 import {
   isValidDestinationChat,
   sendMessage,
   sendRichMessage,
+  sendMediaGroup,
   sendPhoto,
   TelegramError,
   TelegramRateLimitError,
@@ -44,11 +50,13 @@ export const SUBREQUEST_LIMIT_FREE = 50;
 export const SUMMARIZE_RESERVE = 20;
 export const MODEL_LIST_RESERVE = 1;
 /**
- * The single run image costs two subrequests: one Browser Run render plus one
- * `sendPhoto`. Reserving them here keeps the whole invocation inside the
- * platform limit instead of overrunning it at the end of the run.
+ * The run ALBUM costs up to five subrequests: four Browser Run renders (one
+ * per card) plus one `sendMediaGroup` (or `sendPhoto` for a single card).
+ * Reserving them here keeps the whole invocation inside the platform limit
+ * instead of overrunning it at the end of the run. The best-effort Bale
+ * mirror is additional but deliberately not counted, exactly as before.
  */
-export const IMAGE_RESERVE = 2;
+export const IMAGE_RESERVE = 5;
 /** Absolute ceiling, never exceeded regardless of the budget. */
 export const MAX_MESSAGES_PER_RUN = 40;
 
@@ -223,33 +231,47 @@ export interface PublishOptions {
   fetchImpl?: typeof fetch;
   baseUrl?: string;
   /**
-   * Browser Run binding. When absent, the run image is skipped entirely and the
+   * Browser Run binding. When absent, the run album is skipped entirely and the
    * per-channel text digests behave exactly as before.
    */
   browser?: BrowserBinding;
   now?: Date;
   /**
+   * Wait between two album card renders, honoring the free-plan Quick Action
+   * rate limit (≈1 request/10s). The pipeline passes the production value;
+   * 0 (default) renders back to back.
+   */
+  renderSpacingMs?: number;
+  /** Injectable wait, so tests never sleep for real. */
+  sleepImpl?: (ms: number) => Promise<void>;
+  /**
    * Optional Bale mirror (BALE_BOT_TOKEN + BALE_DESTINATION_CHANNEL). Every
-   * delivered Telegram message — the run image and each text digest part — is
+   * delivered Telegram message — the run album and each text digest part — is
    * also sent to Bale. Best effort: a Bale failure is logged and counted but
    * never affects Telegram delivery or publish state.
    */
   bale?: BaleDeliveryOptions;
 }
 
-/** Outcome of the single optional run image. */
+/** Outcome of the optional run album (the multi-image slideshow). */
 export interface ImagePublishOutcome {
-  /** Items shown in the image (at most four, across all channels). */
+  /** Card images actually sent in the album (at most four). */
   selected: number;
-  /** Distinct source channels represented in the image. */
+  /** Distinct source channels represented in the album. */
   channels: number;
   sent: boolean;
   bytes: number;
   width: number;
   height: number;
   browserRunMs: number;
+  /** Remaining headlines carried by the last card's caption. */
+  ticker: number;
+  /** Selected cards that failed to render and were skipped. */
+  skipped: number;
   /** Set when rendering or sending failed; text publishing is unaffected. */
   error?: string;
+  /** Short, safe detail behind `error` (stage/status), for run reports. */
+  detail?: string;
 }
 
 /**
@@ -661,18 +683,20 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
   const messageBudget = publishMessageBudget(enabledChannels);
   let messagesSent = 0;
 
-  // The single run image. Generated once from the flat publishable list and sent
-  // BEFORE any text digest. Deliberately outside the per-channel loop below, so
-  // Browser Run can be called at most once per pipeline run.
-  const image = await publishRunImage({
+  // The run album (slideshow). Generated once from the flat publishable list
+  // and sent BEFORE any text digest. Deliberately outside the per-channel loop
+  // below, so Browser Run is called at most once per card across the run.
+  const image = await publishRunAlbum({
     // RSS rows swap the synthetic `rss_N` username for the feed's display
-    // title, so the image cards and footer show «بی‌بی‌سی فارسی», not @rss_3.
+    // title, so the album cards and captions show «بی‌بی‌سی فارسی», not @rss_3.
     items: usable.map((i) =>
       i.sourceType === 'rss' ? { ...i, channelUsername: channelDisplayName(i) } : i
     ),
     destination,
     token: opts.token,
     browser: opts.browser,
+    renderSpacingMs: opts.renderSpacingMs,
+    sleepImpl: opts.sleepImpl,
     bale,
     baleCounters,
     fetchImpl: opts.fetchImpl,
@@ -786,23 +810,26 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
 }
 
 /**
- * Generates and sends THE single image for this run.
+ * Generates and sends THE run album: one card image per top news item,
+ * delivered by Telegram as a single slideshow (sendMediaGroup).
  *
  * Invariants:
- *  - called exactly once from `runPublishing`, outside the channel loop, so at
- *    most one Browser Run request is made per pipeline execution;
+ *  - called exactly once from `runPublishing`, outside the channel loop, so
+ *    Browser Run is spent only on the album (≤ MAX_IMAGE_ITEMS cards);
  *  - never touches publish state: a failure here leaves every text digest and
  *    every `published_at` exactly as the existing logic would have left them;
- *  - the PNG is a local buffer that is released as soon as the send resolves.
+ *  - every PNG is a local buffer released as soon as the send resolves.
  *
  * Returns null when there is nothing to show, in which case no Browser Run
  * request is made at all.
  */
-async function publishRunImage(input: {
+async function publishRunAlbum(input: {
   items: PublishableMessage[];
   destination: string;
   token: string;
   browser: BrowserBinding | undefined;
+  renderSpacingMs?: number;
+  sleepImpl?: (ms: number) => Promise<void>;
   bale: BaleDeliveryOptions | null;
   baleCounters: { sent: number; failed: number };
   fetchImpl?: typeof fetch;
@@ -812,16 +839,20 @@ async function publishRunImage(input: {
   const { items, destination, token, browser } = input;
   if (items.length === 0) return null;
 
-  let rendered;
+  let album: Awaited<ReturnType<typeof renderRunAlbum>>;
   try {
-    rendered = await renderRunImage({ browser, items, now: input.now });
-  } catch (error) {
-    // Rendering failed (Browser Run unavailable or rate limited). Text
-    // publishing continues untouched and nothing is marked published.
-    logImage('error', {
-      newsCount: items.length,
-      reason: error instanceof Error ? error.message : String(error),
+    album = await renderRunAlbum({
+      browser,
+      items,
+      now: input.now,
+      spacingMs: input.renderSpacingMs,
+      sleepImpl: input.sleepImpl,
     });
+  } catch (error) {
+    // Rendering failed before any card existed (binding unusable). Text
+    // publishing continues untouched and nothing is marked published.
+    const detail = error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 120) : 'unknown';
+    logImage('error', { newsCount: items.length, reason: detail });
     return {
       selected: 0,
       channels: 0,
@@ -830,62 +861,138 @@ async function publishRunImage(input: {
       width: 0,
       height: 0,
       browserRunMs: 0,
+      ticker: 0,
+      skipped: 0,
       error: 'render_failed',
+      detail,
     };
   }
 
-  // No publishable news, or no Browser Run binding configured: no image and no
-  // Browser Run request at all.
-  if (!rendered) return null;
+  // No publishable news, or no Browser Run binding configured: no album and
+  // no Browser Run request at all.
+  if (!album) return null;
 
-  // Mirror the rendered PNG to Bale before the Telegram send. Independent and
+  // Every selected card failed to render (Browser Run down or rate limited).
+  if (album.cards.length === 0) {
+    logImage('error', { newsCount: items.length, reason: album.error, skipped: album.skipped });
+    return {
+      selected: 0,
+      channels: 0,
+      sent: false,
+      bytes: 0,
+      width: 0,
+      height: 0,
+      browserRunMs: album.browserRunMs,
+      ticker: 0,
+      skipped: album.skipped,
+      error: 'render_failed',
+      ...(album.error ? { detail: album.error } : {}),
+    };
+  }
+
+  const captions = buildAlbumCaptions(
+    album.cards.map((card) => card.item),
+    album.ticker,
+    album.hidden,
+    input.now ?? new Date()
+  );
+
+  // Mirror every card to Bale before the Telegram send. Independent and
   // isolated: a Bale failure never changes the Telegram outcome below.
   if (input.bale) {
-    try {
-      await baleSendPhoto({
-        token: input.bale.token,
-        chatId: input.bale.destination,
-        photo: rendered.png,
-        fetchImpl: input.fetchImpl,
-      });
-      input.baleCounters.sent++;
-    } catch (error) {
-      input.baleCounters.failed++;
-      logBale('error', {
-        reason: error instanceof Error ? error.message : String(error),
-      });
+    for (const [index, card] of album.cards.entries()) {
+      try {
+        await baleSendPhoto({
+          token: input.bale.token,
+          chatId: input.bale.destination,
+          photo: card.png,
+          caption: captions[index],
+          fetchImpl: input.fetchImpl,
+        });
+        input.baleCounters.sent++;
+      } catch (error) {
+        input.baleCounters.failed++;
+        logBale('error', {
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   }
 
   const base: ImagePublishOutcome = {
-    selected: rendered.items.length,
-    channels: new Set(rendered.items.map((i) => i.channelUsername)).size,
+    selected: album.cards.length,
+    channels: new Set(album.cards.map((card) => card.item.channelUsername)).size,
     sent: false,
-    bytes: rendered.bytes,
-    width: rendered.width,
-    height: rendered.height,
-    browserRunMs: rendered.browserRunMs,
+    bytes: album.cards.reduce((sum, card) => sum + card.bytes, 0),
+    width: album.cards[0].width,
+    height: album.cards[0].height,
+    browserRunMs: album.browserRunMs,
+    ticker: album.ticker.filter((t) => !t.more).length,
+    skipped: album.skipped,
   };
 
   try {
-    await sendPhoto({
+    await sendAlbum({
       token,
-      chatId: destination,
-      photo: rendered.png,
+      destination,
+      cards: album.cards,
+      captions,
       fetchImpl: input.fetchImpl,
       baseUrl: input.baseUrl,
     });
-    // The PNG is never persisted; it stays referenced only by this local
-    // variable and becomes unreachable when this function returns.
+    // The PNGs are never persisted; they stay referenced only by the local
+    // album variable and become unreachable when this function returns.
     logImage('ok', { ...base, newsCount: items.length });
     return { ...base, sent: true };
   } catch (error) {
+    const detail =
+      error instanceof TelegramRateLimitError
+        ? 'rate_limited'
+        : error instanceof TelegramError
+          ? `HTTP ${error.status}`
+          : 'network';
     logImage('send_failed', {
       newsCount: items.length,
       reason: error instanceof Error ? error.message : String(error),
     });
-    return { ...base, error: 'send_failed' };
+    return { ...base, error: 'send_failed', detail };
   }
+}
+
+/**
+ * Sends the album: one `sendMediaGroup` for two or more cards — Telegram
+ * shows them as a swipeable slideshow — and a plain `sendPhoto` for a single
+ * card, because a media group requires at least two items.
+ */
+async function sendAlbum(input: {
+  token: string;
+  destination: string;
+  cards: RenderedCardImage[];
+  captions: string[];
+  fetchImpl?: typeof fetch;
+  baseUrl?: string;
+}): Promise<void> {
+  if (input.cards.length === 1) {
+    await sendPhoto({
+      token: input.token,
+      chatId: input.destination,
+      photo: input.cards[0].png,
+      caption: input.captions[0],
+      fetchImpl: input.fetchImpl,
+      baseUrl: input.baseUrl,
+    });
+    return;
+  }
+  await sendMediaGroup({
+    token: input.token,
+    chatId: input.destination,
+    media: input.cards.map((card, index) => ({
+      photo: card.png,
+      caption: input.captions[index],
+    })),
+    fetchImpl: input.fetchImpl,
+    baseUrl: input.baseUrl,
+  });
 }
 
 function logImage(status: string, extra: Record<string, unknown> = {}): void {

@@ -20,6 +20,25 @@ export const MAX_MESSAGES_PER_RUN = 20;
  */
 export const MAX_MODEL_FAILURES = 2;
 
+/**
+ * Minimum spacing between two OpenRouter chat requests, so one run stays
+ * under the free tier's account-wide ~20 requests/minute cap. Applied by the
+ * pipeline (configurable via AI_REQUEST_PACE_MS); 0 disables it.
+ */
+export const DEFAULT_AI_PACE_MS = 3200;
+/**
+ * Longest single wait for an account-wide per-minute reset before retrying
+ * the same message on the same model.
+ */
+export const MAX_RATE_LIMIT_WAIT_MS = 30_000;
+/** Total attempts per message when the account-wide minute limit hits. */
+export const RATE_LIMIT_ATTEMPTS = 2;
+/** Total per-run budget for waiting on per-minute resets. */
+export const MAX_RUN_RATE_WAIT_MS = 90_000;
+
+export const sleepMs = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+
 export interface EligibleMessage {
   id: number;
   channelId: number;
@@ -37,6 +56,13 @@ export interface SummarizeRunOptions {
   now?: number;
   windowMs?: number;
   limit?: number;
+  /**
+   * Minimum milliseconds between two AI requests (free-tier pacing).
+   * Default 0 = no pacing; the pipeline passes the production value.
+   */
+  paceMs?: number;
+  /** Injectable wait, so tests never sleep for real. */
+  sleepImpl?: (ms: number) => Promise<void>;
 }
 
 export interface MessageFailure {
@@ -261,126 +287,209 @@ export async function runSummarization(
   }
   report.model = model;
 
-  for (const message of messages) {
+  const paceMs = opts.paceMs ?? 0;
+  const sleepImpl = opts.sleepImpl ?? sleepMs;
+  let lastRequestAt = 0;
+  /** Keeps one run under the free tier's account-wide requests/minute cap. */
+  const pace = async (): Promise<void> => {
+    if (paceMs <= 0 || lastRequestAt === 0) return;
+    const wait = paceMs - (Date.now() - lastRequestAt);
+    if (wait > 0) await sleepImpl(wait);
+  };
+  let rateWaitBudget = MAX_RUN_RATE_WAIT_MS;
+
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index];
     const currentModel = model!;
 
-    try {
-      // External links/identifiers are removed BEFORE the model is called, so
-      // promotional URLs and other channels can never influence (or appear in)
-      // the summary. The source channel's own identity is the only one allowed.
-      const newsBody = stripExternalIdentifiers(message.messageText, message.channelUsername);
-      if (newsBody.length === 0) {
-        fail(message.id, 'empty_after_filter');
-        continue;
-      }
+    // External links/identifiers are removed BEFORE the model is called, so
+    // promotional URLs and other channels can never influence (or appear in)
+    // the summary. The source channel's own identity is the only one allowed.
+    const newsBody = stripExternalIdentifiers(message.messageText, message.channelUsername);
+    if (newsBody.length === 0) {
+      fail(message.id, 'empty_after_filter');
+      continue;
+    }
 
-      const { title, summary, isNews, isAdvertisement, highlights, confidence, category, model: usedModel } = await summarizeNews({
-        apiKey,
-        model: currentModel,
-        text: newsBody,
-        channelUsername: message.channelUsername,
-        messageDate: message.messageDate,
-        fetchImpl: opts.fetchImpl,
-        baseUrl: opts.baseUrl,
-      });
+    // Set when an ACCOUNT-wide free-tier limit was hit: every remaining
+    // message fails with the same category and the run stops making requests.
+    // Rotating models cannot help there — the cap is shared by all free
+    // models, and burning the catalog was exactly the old failure mode.
+    let runAbort: 'rate_limited_minute' | 'rate_limited_daily' | null = null;
 
-      // Second gate after the deterministic filter: the model's own semantic
-      // verdict. Rejected items are parked as filtered, so they never reach a
-      // digest or the global ranking.
-      if (isAdvertisement || !isNews) {
-        await markRejectedByAi(db, message.id, isAdvertisement ? 'ai_advertisement' : 'ai_not_news');
-        report.rejected++;
+    for (let attempt = 1; attempt <= RATE_LIMIT_ATTEMPTS; attempt++) {
+      await pace();
+      try {
+        const { title, summary, isNews, isAdvertisement, highlights, confidence, category, model: usedModel } = await summarizeNews({
+          apiKey,
+          model: currentModel,
+          text: newsBody,
+          channelUsername: message.channelUsername,
+          messageDate: message.messageDate,
+          fetchImpl: opts.fetchImpl,
+          baseUrl: opts.baseUrl,
+        });
+        lastRequestAt = Date.now();
+
+        // Second gate after the deterministic filter: the model's own semantic
+        // verdict. Rejected items are parked as filtered, so they never reach a
+        // digest or the global ranking.
+        if (isAdvertisement || !isNews) {
+          await markRejectedByAi(db, message.id, isAdvertisement ? 'ai_advertisement' : 'ai_not_news');
+          report.rejected++;
+          consecutiveFailures = 0;
+          log({
+            operation: 'summarize',
+            status: 'rejected',
+            model: usedModel,
+            messageId: message.id,
+            telegramMessageId: message.telegramMessageId,
+            channelId: message.channelId,
+            reason: isAdvertisement ? 'ai_advertisement' : 'ai_not_news',
+          });
+          break;
+        }
+
+        // Deterministic title gate. An invalid headline is simply not stored; the
+        // news still publishes from its summary.
+        const safeTitle = validateAiTitle(title);
+        const persisted = await markSummarized(db, message.id, summary, usedModel, safeTitle, { highlights, confidence, category });
+        if (!persisted) {
+          // Already summarized by a concurrent run; nothing to do.
+          break;
+        }
+        report.summarized++;
+        report.withTitle += safeTitle ? 1 : 0;
         consecutiveFailures = 0;
         log({
           operation: 'summarize',
-          status: 'rejected',
+          status: 'ok',
           model: usedModel,
           messageId: message.id,
           telegramMessageId: message.telegramMessageId,
           channelId: message.channelId,
-          reason: isAdvertisement ? 'ai_advertisement' : 'ai_not_news',
+          hasTitle: !!safeTitle,
+          titleRejected: !safeTitle && !!title,
         });
-        continue;
-      }
+        break;
+      } catch (error) {
+        lastRequestAt = Date.now();
+        const category = categorize(error);
 
-      // Deterministic title gate. An invalid headline is simply not stored; the
-      // news still publishes from its summary.
-      const safeTitle = validateAiTitle(title);
-      const persisted = await markSummarized(db, message.id, summary, usedModel, safeTitle, { highlights, confidence, category });
-      if (!persisted) {
-        // Already summarized by a concurrent run; nothing to do.
-        continue;
-      }
-      report.summarized++;
-      report.withTitle += safeTitle ? 1 : 0;
-      consecutiveFailures = 0;
-      log({
-        operation: 'summarize',
-        status: 'ok',
-        model: usedModel,
-        messageId: message.id,
-        telegramMessageId: message.telegramMessageId,
-        channelId: message.channelId,
-        hasTitle: !!safeTitle,
-        titleRejected: !safeTitle && !!title,
-      });
-    } catch (error) {
-      const category = categorize(error);
-      fail(message.id, category);
-      log({
-        operation: 'summarize',
-        status: 'error',
-        category,
-        model: currentModel,
-        messageId: message.id,
-        telegramMessageId: message.telegramMessageId,
-        channelId: message.channelId,
-        detail: error instanceof AiError ? error.message : 'unexpected error',
-      });
-
-      // Rotate away from a failing model, but only among proven-free models.
-      //
-      // A model is abandoned immediately when the provider itself rejects the
-      // call (rate limit / HTTP error), and after MAX_MODEL_FAILURES
-      // consecutive soft failures (unparsable answer, timeout, network blip).
-      // The soft case is what used to burn a whole run: a free endpoint that
-      // answers 200 with prose instead of JSON produced 20 identical
-      // `invalid_response` errors and never rotated.
-      consecutiveFailures++;
-      const hardFailure = category === 'rate_limited' || category === 'provider_error';
-      if (hardFailure || consecutiveFailures >= MAX_MODEL_FAILURES) {
-        await recordModelFailure(db, currentModel, category, now);
-        excluded.push(currentModel);
-        report.abandonedModels.push(currentModel);
-        report.modelRotations++;
-        consecutiveFailures = 0;
-
-        const next = (
-          await resolveFreeModel(db, {
-            fetchImpl: opts.fetchImpl,
-            baseUrl: opts.baseUrl,
-            now,
-            // The list is only re-queried for provider-side failures; a model
-            // that merely answers badly does not mean the catalog is stale.
-            forceRefresh: hardFailure,
-            exclude: excluded,
-            // The admin pin must not be re-selected after it just failed.
-            ignorePin: true,
-          })
-        ).model;
-
-        if (!next) {
-          log({ operation: 'summarize', status: 'aborted', category: 'no_free_model' });
-          for (const rest of messages.slice(messages.indexOf(message) + 1)) {
-            fail(rest.id, 'no_free_model');
+        // Account-wide per-minute limit: wait for the reset, then retry the
+        // SAME model and message. Rotation is deliberately skipped.
+        if (category === 'rate_limited_minute') {
+          const retryAfter = error instanceof AiError ? error.retryAfterMs : undefined;
+          const wait = Math.min(retryAfter ?? 20_000, MAX_RATE_LIMIT_WAIT_MS, rateWaitBudget);
+          if (attempt < RATE_LIMIT_ATTEMPTS && wait > 0) {
+            rateWaitBudget -= wait;
+            log({
+              operation: 'summarize',
+              status: 'rate_wait',
+              category,
+              model: currentModel,
+              messageId: message.id,
+              waitMs: wait,
+            });
+            await sleepImpl(wait);
+            continue;
           }
-          report.model = currentModel;
-          return report;
+          fail(message.id, category);
+          log({
+            operation: 'summarize',
+            status: 'error',
+            category,
+            model: currentModel,
+            messageId: message.id,
+            telegramMessageId: message.telegramMessageId,
+            channelId: message.channelId,
+            detail: error instanceof AiError ? error.message : 'unexpected error',
+          });
+          runAbort = category;
+          break;
         }
-        model = next;
-        report.model = next;
-        log({ operation: 'model-rotate', status: 'ok', model: next, previous: currentModel });
+
+        // Account-wide daily limit: no free model will answer until the next
+        // UTC day. Stop the run; the next runs pick up whatever is left.
+        if (category === 'rate_limited_daily') {
+          fail(message.id, category);
+          log({
+            operation: 'summarize',
+            status: 'aborted',
+            category,
+            model: currentModel,
+            messageId: message.id,
+            telegramMessageId: message.telegramMessageId,
+            channelId: message.channelId,
+          });
+          runAbort = category;
+          break;
+        }
+
+        fail(message.id, category);
+        log({
+          operation: 'summarize',
+          status: 'error',
+          category,
+          model: currentModel,
+          messageId: message.id,
+          telegramMessageId: message.telegramMessageId,
+          channelId: message.channelId,
+          detail: error instanceof AiError ? error.message : 'unexpected error',
+        });
+
+        // Rotate away from a failing model, but only among proven-free models.
+        //
+        // A model is abandoned immediately when the provider itself rejects the
+        // call (rate limit / HTTP error), and after MAX_MODEL_FAILURES
+        // consecutive soft failures (unparsable answer, timeout, network blip).
+        // The soft case is what used to burn a whole run: a free endpoint that
+        // answers 200 with prose instead of JSON produced 20 identical
+        // `invalid_response` errors and never rotated.
+        consecutiveFailures++;
+        const hardFailure = category === 'rate_limited' || category === 'provider_error';
+        if (hardFailure || consecutiveFailures >= MAX_MODEL_FAILURES) {
+          await recordModelFailure(db, currentModel, category, now);
+          excluded.push(currentModel);
+          report.abandonedModels.push(currentModel);
+          report.modelRotations++;
+          consecutiveFailures = 0;
+
+          const next = (
+            await resolveFreeModel(db, {
+              fetchImpl: opts.fetchImpl,
+              baseUrl: opts.baseUrl,
+              now,
+              // The list is only re-queried for provider-side failures; a model
+              // that merely answers badly does not mean the catalog is stale.
+              forceRefresh: hardFailure,
+              exclude: excluded,
+              // The admin pin must not be re-selected after it just failed.
+              ignorePin: true,
+            })
+          ).model;
+
+          if (!next) {
+            log({ operation: 'summarize', status: 'aborted', category: 'no_free_model' });
+            for (const rest of messages.slice(index + 1)) {
+              fail(rest.id, 'no_free_model');
+            }
+            report.model = currentModel;
+            return report;
+          }
+          model = next;
+          report.model = next;
+          log({ operation: 'model-rotate', status: 'ok', model: next, previous: currentModel });
+        }
+        break;
       }
+    }
+
+    if (runAbort) {
+      for (const rest of messages.slice(index + 1)) {
+        fail(rest.id, runAbort);
+      }
+      return report;
     }
   }
 
