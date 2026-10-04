@@ -1,0 +1,19 @@
+# Copy to .dev.vars for local `wrangler dev` and fill in real values.
+# Never commit .dev.vars.
+ADMIN_PASSWORD="change-me-long-random-password"
+TELEGRAM_BOT_TOKEN="123456789:replace-with-botfather-token"
+# OpenCode Zen key (https://opencode.ai). Server-side only.
+# For the deployed Worker use: npx wrangler secret put OPENCODE_API_KEY
+OPENCODE_API_KEY=""
+# Phase 4 destination chat: "@channel_username" or "-1001234567890".
+# Server-side only; not configurable through the UI or API.
+# For the deployed Worker use: npx wrangler secret put TELEGRAM_DESTINATION_CHANNEL
+TELEGRAM_DESTINATION_CHANNEL=""
+# Telegram admin numeric User.id (digits only). Never a username.
+# Find it via @userinfobot, or read update JSON from the webhook.
+# For the deployed Worker use: npx wrangler secret put TELEGRAM_ADMIN_USER_ID
+TELEGRAM_ADMIN_USER_ID=""
+# Shared secret for the X-Telegram-Bot-Api-Secret-Token header (min 16 chars).
+# Generate e.g.: openssl rand -hex 24
+# For the deployed Worker use: npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
+TELEGRAM_WEBHOOK_SECRET=""

@@ -1,0 +1,29 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "news-telegram-bot",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-01",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"workers_dev": true,
+	"observability": {
+		"enabled": true
+	},
+	"triggers": {
+		"crons": [
+			"30 * * * *"
+		]
+	},
+	"browser": {
+		"binding": "BROWSER"
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "news-bot",
+			"database_id": "cc0b1042-6204-4958-add6-611cf461a864",
+			"migrations_dir": "migrations"
+		}
+	]
+}
