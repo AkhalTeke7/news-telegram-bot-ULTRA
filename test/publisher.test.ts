@@ -5,12 +5,14 @@ import {
   channelDisplayName,
   destinationLabel,
   groupByChannel,
+  isValidArticleUrl,
   isValidBaleDestination,
   MAX_MESSAGES_PER_RUN,
   publishMessageBudget,
   resolveBaleDelivery,
   runPublishing,
   selectPublishableMessages,
+  sourceLabel,
   type PublishableMessage,
 } from '../src/publisher';
 import { isValidDestinationChat } from '../src/telegram';
@@ -146,6 +148,7 @@ describe('grouping', () => {
     channelId,
     channelUsername: username,
     channelTitle: null,
+    sourceType: 'telegram',
     telegramMessageId: id,
     summaryText: 'x',
     title: null,
@@ -353,6 +356,97 @@ describe('publishing one message per channel', () => {
 
     expect(t.sent).toHaveLength(0);
     expect(report.failures[0].category).toBe('invalid_source_url');
+  });
+});
+
+describe('RSS-sourced news', () => {
+  beforeEach(reset);
+
+  async function seedRssChannel(id: number, title: string) {
+    const r = await env.DB.prepare(
+      `INSERT INTO channels (channel_username, channel_title, enabled, source_type) VALUES (?1, ?2, 1, 'rss')`
+    )
+      .bind(`rss_${id}`, title)
+      .run();
+    return Number(r.meta.last_row_id);
+  }
+
+  async function seedRssNews(channelId: number, telegramId: number, summary: string, url: string) {
+    const r = await env.DB.prepare(
+      `INSERT INTO messages (source_channel_id, telegram_message_id, message_date, message_text, source_url, summary_text, summarized_at)
+       VALUES (?1, ?2, ?3, 'متن خام', ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`
+    )
+      .bind(channelId, telegramId, new Date(NOW - 600_000).toISOString(), url, summary)
+      .run();
+    return Number(r.meta.last_row_id);
+  }
+
+  it('publishes RSS rows whose source link is a normal https article URL', async () => {
+    const ch = await seedRssChannel(1, 'بی‌بی‌سی فارسی');
+    await seedRssNews(ch, 1, 'خلاصهٔ خبر آر‌اس‌اس', 'https://www.bbc.com/persian/articles/c1234567890o');
+
+    const t = telegramRecorder();
+    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
+
+    expect(report.published).toBe(1);
+    expect(report.failures).toHaveLength(0);
+    expect(t.sent).toHaveLength(1);
+    // The footer uses the feed's display title, never the internal rss_N
+    // username and never an invented @ in front of Persian text.
+    expect(t.sent[0].text).toBe('خلاصهٔ خبر آر‌اس‌اس\n\nمنبع: بی‌بی‌سی فارسی\n@destination');
+    expect(t.sent[0].text).not.toContain('rss_');
+  });
+
+  it('still rejects RSS rows whose stored link is not a valid https URL', async () => {
+    const ch = await seedRssChannel(2, 'زومیت');
+    await seedRssNews(ch, 1, 'خبر با لینک خراب', 'http://insecure.example.com/a');
+    await seedRssNews(ch, 2, 'خبر بدون لینک معتبر', 'not a url');
+
+    const t = telegramRecorder();
+    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
+
+    expect(t.sent).toHaveLength(0);
+    expect(report.published).toBe(0);
+    expect(report.failures.map((f) => f.category)).toEqual(['invalid_source_url', 'invalid_source_url']);
+  });
+
+  it('keeps requiring t.me links for Telegram-sourced rows', async () => {
+    const ch = await seedChannel('tg_chan');
+    const bad = await seedNews(ch, 'tg_chan', 1, 'خبر تلگرامی');
+    await env.DB.prepare(`UPDATE messages SET source_url = 'https://example.com/a' WHERE id = ?1`).bind(bad).run();
+
+    const t = telegramRecorder();
+    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
+
+    expect(t.sent).toHaveLength(0);
+    expect(report.failures[0].category).toBe('invalid_source_url');
+  });
+
+  it('validates article URLs strictly', () => {
+    expect(isValidArticleUrl('https://www.bbc.com/persian/articles/x')).toBe(true);
+    expect(isValidArticleUrl('https://zoomit.ir/2026/a-b-c/')).toBe(true);
+    expect(isValidArticleUrl('http://www.bbc.com/persian')).toBe(false); // not https
+    expect(isValidArticleUrl('https://localhost/x')).toBe(false); // no dot in host
+    expect(isValidArticleUrl('https://a.b/ x')).toBe(false); // whitespace
+    expect(isValidArticleUrl('')).toBe(false);
+    expect(isValidArticleUrl(`https://a.ir/${'x'.repeat(2050)}`)).toBe(false); // too long
+  });
+
+  it('prefers the feed title as the display name for RSS channels', () => {
+    expect(
+      channelDisplayName({ channelUsername: 'rss_3', channelTitle: 'بی‌بی‌سی فارسی', sourceType: 'rss' })
+    ).toBe('بی‌بی‌سی فارسی');
+    // Telegram channels keep the username-first behavior.
+    expect(
+      channelDisplayName({ channelUsername: 'news_one', channelTitle: 'عنوان', sourceType: 'telegram' })
+    ).toBe('news_one');
+    // RSS without a title falls back to the internal username, never invents one.
+    expect(channelDisplayName({ channelUsername: 'rss_9', channelTitle: null, sourceType: 'rss' })).toBe('rss_9');
+  });
+
+  it('labels ASCII usernames with @ and display titles verbatim', () => {
+    expect(sourceLabel('news_one')).toBe('@news_one');
+    expect(sourceLabel('بی‌بی‌سی فارسی')).toBe('بی‌بی‌سی فارسی');
   });
 });
 
