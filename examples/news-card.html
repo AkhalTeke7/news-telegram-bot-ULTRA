@@ -5,9 +5,11 @@
   <title>News card render example</title>
   <style>
     * { box-sizing: border-box; }
+    @font-face { font-family: Vazirmatn; src: url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/webfonts/Vazirmatn-Regular.woff2'); }
+    @font-face { font-family: Vazirmatn; font-weight: 800; src: url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/webfonts/Vazirmatn-Bold.woff2'); }
     html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; }
     body {
-      font-family: Tahoma, Arial, sans-serif; color: #202838; padding: 90px 130px;
+      font-family: Vazirmatn, Tahoma, Arial, sans-serif; color: #202838; padding: 72px 78px;
       background: radial-gradient(circle at 10% 8%, #fc466b33, transparent 28%),
                   radial-gradient(circle at 92% 88%, #3f5efb3d, transparent 34%),
                   linear-gradient(135deg, #e8edf8, #dfe5f1 42%, #eef1ed);
@@ -19,10 +21,10 @@
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 56px; }
     article { min-height: 340px; padding: 34px 44px; border-radius: 30px; border: 2px solid #ffffffdd; background: #ffffffb8; box-shadow: 0 18px 42px #3f5efb22, inset 0 1px 0 #ffffffe8; position: relative; }
     article::after { content: ""; position: absolute; right: 0; top: 25%; height: 50%; width: 6px; border-radius: 4px; background: var(--accent); }
-    .source { color: #7dd3fc; font-size: 24px; direction: ltr; text-align: right; }
+    .source { color: #3f5efb; font-size: 24px; direction: ltr; text-align: right; }
     h2 { font-size: 42px; line-height: 1.35; margin: 20px 0 12px; }
-    p { color: #d7e6f7; font-size: 28px; line-height: 1.55; margin: 0; }
-    footer { margin-top: 36px; color: #cfe0f5; font-size: 28px; }
+    p { color: #596274; font-size: 28px; line-height: 1.55; margin: 0; }
+    footer { margin-top: 36px; color: #596274; font-size: 28px; }
   </style>
 </head>
 <body>
@@ -44,13 +46,13 @@
         channel: "news_one",
         title: "وزیر اقتصاد از بسته جدید حمایت از تولید خبر داد",
         summary: "این بسته با هدف کاهش هزینه‌های تولید و تسهیل دسترسی بنگاه‌ها به منابع مالی اجرا می‌شود.",
-        accent: "#4f8cff"
+        accent: "#3f5efb"
       },
       {
         channel: "news_two",
         title: "افتتاح مسیر جدید حمل‌ونقل در شمال کشور",
         summary: "با بهره‌برداری از این مسیر، زمان جابه‌جایی کالا میان چند شهر کاهش خواهد یافت.",
-        accent: "#22d3ee"
+        accent: "#8e54bf"
       }
     ];
 
