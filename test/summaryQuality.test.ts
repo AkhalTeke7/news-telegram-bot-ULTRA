@@ -182,11 +182,9 @@ describe('digest never carries source metadata into the body', () => {
     ]);
 
     const text = parts[0].text;
-    expect(text).toBe(
-      'امام جمعه مشهد اعلام کرد که مراسم برگزار می‌شود.\n\n' +
-        'همزمان وزیر راه از باز شدن ۲۰ کیلومتر مسیر جدید خبر داد که درآمدزایی سالانهٔ آن ۴۰ میلیارد تومان است و به ۱۲ روستا می‌رسد.\n\n' +
-        `منبع: @${SOURCE}\n@destination`
-    );
-    expect(text).not.toMatch(/📰|t\.me|eitaa|published a post|post titled/);
+    expect(text).toContain('📰 <b>خبر عمومی</b>\n📝 <b>خلاصه:</b> امام جمعه مشهد اعلام کرد که مراسم برگزار می‌شود.');
+    expect(text).toContain('🏛️ <b>خبر سیاست</b>\n📝 <b>خلاصه:</b> همزمان وزیر راه از باز شدن ۲۰ کیلومتر مسیر جدید خبر داد');
+    expect(text).toContain(`📡 <i>منبع: @${SOURCE}</i>\n📣 <i>@destination</i>`);
+    expect(text).not.toMatch(/t\.me|eitaa|published a post|post titled/);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getChatByUsername, getMe, TelegramError } from '../src/telegram';
+import { getChatByUsername, getMe, sendMessage, TelegramError } from '../src/telegram';
 
 const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -28,6 +28,26 @@ describe('telegram bot api client', () => {
     const chat = await getChatByUsername({ token: 'T', fetchImpl }, 'somechannel');
     expect(chat.title).toBe('اخبار');
     expect(chat.type).toBe('channel');
+  });
+
+  it('sends HTML parse mode when a rich-text digest requests it', async () => {
+    let body: Record<string, string> | undefined;
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      body = JSON.parse(String((init as RequestInit).body)) as Record<string, string>;
+      return jsonResponse({ ok: true, result: { message_id: 7, date: 1 } });
+    };
+
+    await sendMessage({
+      token: 'T',
+      chatId: '@somechannel',
+      text: '📰 <b>عنوان</b>\n📝 جزئیات',
+      parseMode: 'HTML',
+      fetchImpl,
+      baseUrl: 'https://api.test',
+    });
+
+    expect(body?.parse_mode).toBe('HTML');
+    expect(body?.text).toContain('<b>عنوان</b>');
   });
 
   it('throws TelegramError(400) when the username is unknown', async () => {

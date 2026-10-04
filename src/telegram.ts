@@ -117,10 +117,14 @@ export interface SentMessage {
   date: number;
 }
 
+export type TelegramParseMode = 'HTML' | 'MarkdownV2';
+
 export interface SendMessageOptions extends TelegramClientOptions {
   chatId: DestinationChat;
-  /** Plain text only: no parse_mode, so untrusted content cannot break formatting. */
+  /** Text to send. Callers must escape untrusted values when using a parse mode. */
   text: string;
+  /** Optional Telegram rich-text parser. News digests use HTML. */
+  parseMode?: TelegramParseMode;
   disableNotification?: boolean;
   replyMarkup?: InlineKeyboardMarkup;
   /** Bounded so one slow Telegram call cannot consume the invocation budget. */
@@ -205,6 +209,7 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SentMessage
     chat_id: opts.chatId,
     text: opts.text,
   };
+  if (opts.parseMode) payload.parse_mode = opts.parseMode;
   if (opts.disableNotification) payload.disable_notification = 'true';
   if (opts.replyMarkup) payload.reply_markup = JSON.stringify(opts.replyMarkup);
 

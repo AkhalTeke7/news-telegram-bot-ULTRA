@@ -74,6 +74,20 @@ function telegramRecorder(ok: (text: string) => boolean = () => true, status = 2
   return { sent, fetchImpl };
 }
 
+function expectRichDigest(
+  text: string,
+  summaries: string[],
+  source: string,
+  destination = '@destination'
+): void {
+  for (const summary of summaries) {
+    expect(text).toContain(`📰 <b>خبر عمومی</b>\n📝 <b>خلاصه:</b> ${summary}`);
+  }
+  expect(text).toContain(`📡 <i>منبع: ${source}</i>`);
+  if (destination) expect(text).toContain(`📣 <i>${destination}</i>`);
+  expect(text).not.toContain('https://');
+}
+
 const envFor = () =>
   ({ DB: env.DB, TELEGRAM_BOT_TOKEN: 'T', ADMIN_PASSWORD: 'x' }) as Env;
 
@@ -93,20 +107,31 @@ describe('digest formatting', () => {
     ]);
 
     expect(parts).toHaveLength(1);
-    expect(parts[0].text).toBe('خبر اول\n\nخبر دوم\n\nخبر سوم\n\nمنبع: @news1\n@destination');
-    // No header any more.
-    expect(parts[0].text).not.toContain('📰');
+    expectRichDigest(parts[0].text, ['خبر اول', 'خبر دوم', 'خبر سوم'], '@news1');
     expect(parts[0].itemIds).toEqual([1, 2, 3]);
   });
 
   it('exposes no ids, model names, filter data, URLs or raw post text', () => {
     const text = buildChannelDigest('news1', '@destination', [{ id: 7, summaryText: 'خلاصه خبر' }])[0].text;
-    expect(text).toBe('خلاصه خبر\n\nمنبع: @news1\n@destination');
+    expectRichDigest(text, ['خلاصه خبر'], '@news1');
     expect(text).not.toMatch(/🔗|https?:\/\/|t\.me|eitaa\.com|\bid\b|free|score|مدل|published a post/);
   });
 
-  it('returns nothing when every summary is empty', () => {
-    expect(buildChannelDigest('news1', '@destination', [{ id: 1, summaryText: '   ' }])).toEqual([]);
+  it('renders the AI title, topic emoji, key points and escaped detail as HTML', () => {
+    const [part] = buildChannelDigest('tech_news', '@destination', [
+      {
+        id: 1,
+        title: 'افشای <نسخه> جدید',
+        category: 'technology',
+        summaryText: 'جزئیات خبر با مقدار A & B.',
+        highlights: ['نکته اول', 'نکته دوم'],
+      },
+    ]);
+
+    expect(part.text).toContain('💻 <b>افشای &lt;نسخه&gt; جدید</b>');
+    expect(part.text).toContain('📝 <b>خلاصه:</b> جزئیات خبر با مقدار A &amp; B.');
+    expect(part.text).toContain('🔎 <b>نکات مهم:</b> نکته اول · نکته دوم');
+    expect(part.text).toContain('📡 <i>منبع: @tech_news</i>');
   });
 
   it('splits oversized output without cutting a summary and keeps the footer', () => {
@@ -122,15 +147,16 @@ describe('digest formatting', () => {
     for (const part of parts) {
       expect(part.text.length).toBeLessThanOrEqual(4096);
       // Every part carries the required footer and no header.
-      expect(part.text.endsWith('منبع: @news1\n@destination')).toBe(true);
-      expect(part.text).not.toContain('📰');
+      expect(part.text).toContain('📡 <i>منبع: @news1</i>');
+      expect(part.text).toContain('📣 <i>@destination</i>');
       // No summary was cut in half: every body line is a whole summary.
       for (const chunk of part.text.split('منبع:')[0].trim().split('\n\n')) {
+        if (!chunk.includes('📝')) continue;
         expect(chunk).toContain(long.slice(0, 100));
       }
     }
     expect(parts.flatMap((p) => p.itemIds)).toEqual([1, 2, 3, 4]);
-    expect(parts[0].text).toContain(long.slice(0, 1100));
+    expect(parts[0].text).toContain(long.slice(0, 1000));
   });
 
   it('keeps a single oversized summary intact rather than dropping it', () => {
@@ -138,7 +164,7 @@ describe('digest formatting', () => {
     expect(parts).toHaveLength(1);
     expect(parts[0].itemIds).toEqual([1]);
     expect(parts[0].text.length).toBeLessThanOrEqual(4096);
-    expect(parts[0].text.endsWith('منبع: @news1\n@destination')).toBe(true);
+    expect(parts[0].text).toContain('📡 <i>منبع: @news1</i>\n📣 <i>@destination</i>');
   });
 });
 
@@ -182,7 +208,7 @@ describe('publishing one message per channel', () => {
 
     expect(report.published).toBe(3);
     expect(t.sent).toHaveLength(1);
-    expect(t.sent[0].text).toBe('خبر اول\n\nخبر دوم\n\nخبر سوم\n\nمنبع: @news1\n@destination');
+    expectRichDigest(t.sent[0].text, ['خبر اول', 'خبر دوم', 'خبر سوم'], '@news1');
     expect((await publishedRows()).every((r) => r.published_at !== null)).toBe(true);
     expect((await publishedRows()).every((r) => r.telegram_destination_message_id === 1001)).toBe(true);
   });
@@ -204,8 +230,8 @@ describe('publishing one message per channel', () => {
 
     expect(report.published).toBe(5);
     expect(t.sent).toHaveLength(2);
-    expect(t.sent[0].text).toBe('خبر ۱\n\nخبر ۲\n\nخبر ۳\n\nمنبع: @news1\n@destination');
-    expect(t.sent[1].text).toBe('خبر الف\n\nخبر ب\n\nمنبع: @news3\n@destination');
+    expectRichDigest(t.sent[0].text, ['خبر ۱', 'خبر ۲', 'خبر ۳'], '@news1');
+    expectRichDigest(t.sent[1].text, ['خبر الف', 'خبر ب'], '@news3');
     expect(t.sent.map((s) => s.text.includes('@news2'))).toEqual([false, false]);
     void b;
   });
@@ -237,8 +263,8 @@ describe('publishing one message per channel', () => {
     await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
 
     expect(t.sent).toHaveLength(2);
-    expect(t.sent[0].text).toBe('اول\n\nدوم\n\nمنبع: @first_chan\n@destination');
-    expect(t.sent[1].text).toBe('تنها\n\nمنبع: @second_chan\n@destination');
+    expectRichDigest(t.sent[0].text, ['اول', 'دوم'], '@first_chan');
+    expectRichDigest(t.sent[1].text, ['تنها'], '@second_chan');
   });
 
   it('an oversized channel is split into several messages, never merged with another', async () => {
@@ -268,7 +294,7 @@ describe('publishing one message per channel', () => {
     ).first<{ n: number }>();
     expect(delivered?.n).toBe(9);
     // Continuation parts stay on the same channel, in order.
-    expect(bigParts.every((p) => p.text.endsWith('منبع: @big_chan\n@destination'))).toBe(true);
+    expect(bigParts.every((p) => p.text.includes('📡 <i>منبع: @big_chan</i>'))).toBe(true);
   });
 
   it('a failed delivery marks nothing published and keeps rows for retry', async () => {
@@ -343,7 +369,7 @@ describe('publishing one message per channel', () => {
     await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
 
     expect(t.sent).toHaveLength(1);
-    expect(t.sent[0].text).toBe('مجاز\n\nمنبع: @on_chan\n@destination');
+    expectRichDigest(t.sent[0].text, ['مجاز'], '@on_chan');
   });
 
   it('does not publish rows whose stored source link is unusable', async () => {
@@ -393,7 +419,7 @@ describe('RSS-sourced news', () => {
     expect(t.sent).toHaveLength(1);
     // The footer uses the feed's display title, never the internal rss_N
     // username and never an invented @ in front of Persian text.
-    expect(t.sent[0].text).toBe('خلاصهٔ خبر آر‌اس‌اس\n\nمنبع: بی‌بی‌سی فارسی\n@destination');
+    expectRichDigest(t.sent[0].text, ['خلاصهٔ خبر آر‌اس‌اس'], 'بی‌بی‌سی فارسی');
     expect(t.sent[0].text).not.toContain('rss_');
   });
 
@@ -458,15 +484,10 @@ describe('final channel message format', () => {
       { id: 3, summaryText: 'خبر سوم' },
     ])[0].text;
 
-    expect(text).toBe('خبر اول\n\nخبر دوم\n\nخبر سوم\n\nمنبع: @news_one\n@destination');
-    // No header at all.
-    expect(text.startsWith('📰')).toBe(false);
-    expect(text).not.toContain('📰');
+    expectRichDigest(text, ['خبر اول', 'خبر دوم', 'خبر سوم'], '@news_one');
     // Exactly one source footer, destination immediately below it.
     expect(text.match(/منبع:/g)).toHaveLength(1);
-    expect(text.split('\n').slice(-2)).toEqual(['منبع: @news_one', '@destination']);
-    // One blank line between summaries and before the footer.
-    expect(text.split('\n\n').slice(0, 3)).toEqual(['خبر اول', 'خبر دوم', 'خبر سوم']);
+    expect(text).toContain('📡 <i>منبع: @news_one</i>\n📣 <i>@destination</i>');
   });
 
   it('never repeats the source channel after individual summaries', () => {
@@ -510,7 +531,7 @@ describe('final channel message format', () => {
 
   it('omits the destination line only when nothing is configured', () => {
     const text = buildChannelDigest('chan_three', '', [{ id: 1, summaryText: 'الف' }])[0].text;
-    expect(text).toBe('الف\n\nمنبع: @chan_three');
+    expectRichDigest(text, ['الف'], '@chan_three', '');
   });
 
   it('counts footer lines in the 4096 limit', () => {
@@ -524,7 +545,7 @@ describe('final channel message format', () => {
     expect(parts.length).toBeGreaterThan(1);
     for (const part of parts) {
       expect(part.text.length).toBeLessThanOrEqual(4096);
-      expect(part.text.endsWith('منبع: @limit_chan\n@destination')).toBe(true);
+      expect(part.text).toContain('📡 <i>منبع: @limit_chan</i>');
     }
     expect(parts.flatMap((p) => p.itemIds)).toEqual([1, 2, 3, 4, 5]);
   });
@@ -535,7 +556,7 @@ describe('final channel message format', () => {
     ]);
     expect(parts).toHaveLength(1);
     expect(parts[0].text.length).toBeLessThanOrEqual(4096);
-    expect(parts[0].text.endsWith('منبع: @huge_chan\n@destination')).toBe(true);
+    expect(parts[0].text).toContain('📡 <i>منبع: @huge_chan</i>');
     expect(parts[0].itemIds).toEqual([1]);
   });
 
@@ -712,8 +733,8 @@ describe('manual processing uses the same behavior', () => {
     });
     expect(report.published).toBe(3);
     expect(t.sent).toHaveLength(2);
-    expect(t.sent[0].text).toBe('الف\n\nب\n\nمنبع: @manual_a\n@destination');
-    expect(t.sent[1].text).toBe('ج\n\nمنبع: @manual_b\n@destination');
+    expectRichDigest(t.sent[0].text, ['الف', 'ب'], '@manual_a');
+    expectRichDigest(t.sent[1].text, ['ج'], '@manual_b');
   });
 });
 

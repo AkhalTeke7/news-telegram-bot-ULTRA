@@ -4,8 +4,10 @@ Persian (Farsi) RTL news bot on Cloudflare Workers. Every two hours it collects 
 Telegram channels and configured RSS feeds, filters advertisements, summarizes and ranks
 stories with **free OpenRouter models only**, renders the run as a Vazirmatn HTML
 screenshot with Cloudflare Browser Run (top-4 news as cards plus every remaining headline
-in a one-line ticker), and publishes text and images to Telegram and, when configured,
-mirrors the same output to Bale.
+in a one-line ticker), and publishes high-resolution images plus HTML-formatted text digests to
+Telegram and, when configured, mirrors the same rich output to Bale. Digest headlines use the AI
+topic category for a related emoji, and every story includes its title, summary details, and
+available key points.
 
 RSS sources currently include BBC Persian, Zoomit, Mobile.ir, and IRIB News. No paid
 models, MTProto, or committed credentials are required. Chat completions run through
@@ -221,7 +223,9 @@ four eligible items as cards (titles, summaries, source labels) and a horizontal
 **ticker strip** below them carrying every remaining headline of the run — one brief
 single-line entry per item, truncated at a word boundary, with a trailing
 «و n خبر دیگر» line when more than eight remain. The footer credits every channel
-visible in the image, cards and ticker alike. Browser Run rasterizes it at 1920×1080;
+visible in the image, cards and ticker alike. Browser Run rasterizes it at 2560×1440 with
+high-contrast, larger card typography so the summary details remain readable when Telegram scales
+the photo down;
 the PNG is immediately sent to the destination with Telegram `sendPhoto` (and mirrored
 to Bale when configured) and is not stored in D1 or R2. Image failure is isolated, so
 the ordinary per-channel text digests still publish.

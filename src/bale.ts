@@ -27,10 +27,16 @@ interface BaleCallOptions {
   timeoutMs?: number;
 }
 
+export type BaleParseMode = 'HTML' | 'MarkdownV2';
+
 export async function baleSendMessage(
-  opts: BaleCallOptions & { text: string }
+  opts: BaleCallOptions & { text: string; parseMode?: BaleParseMode }
 ): Promise<void> {
-  await call('sendMessage', opts, { chat_id: opts.chatId, text: opts.text });
+  await call('sendMessage', opts, {
+    chat_id: opts.chatId,
+    text: opts.text,
+    ...(opts.parseMode ? { parse_mode: opts.parseMode } : {}),
+  });
 }
 
 export async function baleSendPhoto(

@@ -1,7 +1,7 @@
 /**
  * One Liquid Glass news image per pipeline run.
  *
- * Purpose: a single 1920x1080 "front page" for the whole run, rendered through
+ * Purpose: a single high-resolution "front page" for the whole run, rendered through
  * Cloudflare Browser Run, showing the most important news across ALL enabled
  * source channels.
  *
@@ -24,11 +24,17 @@
  */
 
 import type { PublishableMessage } from './publisher';
+import { topicPresentation } from './topic';
 import { formatTehranDateTime, tehranParts } from './time';
 
-/** Hard cap required by the product: one image shows at most four news items. */
-export const IMAGE_WIDTH = 1920;
-export const IMAGE_HEIGHT = 1080;
+/**
+ * High-resolution output keeps the summary readable after Telegram scales the
+ * photo down in a channel preview. The HTML viewport and the PNG share these
+ * dimensions, so Browser Run captures the larger canvas rather than merely
+ * stretching a small image.
+ */
+export const IMAGE_WIDTH = 2560;
+export const IMAGE_HEIGHT = 1440;
 export const MAX_IMAGE_ITEMS = 4;
 
 /** Below this, a single sentence is too short to work as a headline. */
@@ -48,6 +54,8 @@ export interface ImageNewsItem {
   /** Same row id the text digest marks published; not used for publishing. */
   id: number;
   channelUsername: string;
+  /** AI topic category, used only for the small topic emoji. */
+  category?: string | null;
   /** Derived from the same summary text the digest publishes. */
   title: string;
   /** Byte-identical to the summary the Telegram digest will carry. */
@@ -198,6 +206,7 @@ export function selectTopNews(
   return ranked.slice(0, limit).map((item) => ({
     id: item.id,
     channelUsername: item.channelUsername,
+    category: item.category,
     // The AI headline when present; legacy rows without one fall back to the
     // summary's leading sentence so the card is never blank.
     title: item.title && item.title.trim() ? item.title.trim() : deriveCardTitle(item.summaryText),
@@ -267,7 +276,6 @@ function esc(value: string): string {
 }
 
 const ACCENTS = ['#1fb98a', '#f0b34a', '#5b9dff', '#d34f74'];
-const FA_DIGITS = ['۱', '۲', '۳', '۴'];
 
 /**
  * Frosted "liquid glass" frame as HTML/CSS: pastel mesh background, glossy
@@ -280,16 +288,17 @@ export function buildImageHtml(frame: ImageFrame): string {
   // template can never lay out a fifth card outside the 2x2 grid.
   const items = frame.items.slice(0, MAX_IMAGE_ITEMS);
   const cards = items
-    .map(
-      (item, i) => `<article class="card" style="--c:${ACCENTS[i % 4]}">
+    .map((item, i) => {
+      const topic = topicPresentation(item.category, `${item.title} ${item.summary}`);
+      return `<article class="card" style="--c:${ACCENTS[i % 4]}">
         <div class="top">
-          <span class="icon">${FA_DIGITS[i % 4]}</span>
-          <div class="txt"><h2>${esc(item.title)}</h2><div class="sub">${esc(channelLabel(item.channelUsername))}</div></div>
+          <span class="icon" aria-label="${esc(topic.label)}">${topic.emoji}</span>
+          <div class="txt"><h2>${esc(item.title)}</h2><div class="sub">${esc(topic.label)} · ${esc(channelLabel(item.channelUsername))}</div></div>
         </div>
         <p>${esc(item.summary)}</p>
         <div class="live">زنده</div>
-      </article>`
-    )
+      </article>`;
+    })
     .join('\n        ');
 
   const grid = ['one', 'two', 'three', 'four'][Math.max(0, Math.min(3, items.length - 1))];
@@ -331,15 +340,15 @@ export function buildImageHtml(frame: ImageFrame): string {
     border-color:rgba(255,242,190,.9);
     box-shadow:inset 8px 8px 18px rgba(255,251,225,.92),inset -11px -14px 24px rgba(200,140,10,.28),0 16px 26px rgba(190,140,30,.2)}
   .bubble.mini{box-shadow:inset 3px 3px 7px rgba(255,251,225,.9),inset -4px -5px 9px rgba(200,140,10,.28),0 8px 12px rgba(190,140,30,.2)}
-  .frame{position:relative;z-index:2;width:${IMAGE_WIDTH}px;height:${IMAGE_HEIGHT}px;padding:78px 120px 0;display:flex;flex-direction:column}
+  .frame{position:relative;z-index:2;width:${IMAGE_WIDTH}px;height:${IMAGE_HEIGHT}px;padding:96px 150px 0;display:flex;flex-direction:column}
   .head{display:flex;justify-content:space-between;align-items:center;padding:0 8px}
-  .title{display:flex;align-items:center;gap:18px;font-size:68px;font-weight:800;line-height:1.1;text-shadow:1px 1px 0 rgba(255,255,255,.5)}
-  .title i{width:16px;height:16px;border-radius:50%;background:#e9a93a;box-shadow:0 0 0 7px rgba(255,255,255,.55),0 0 20px rgba(233,169,58,.6)}
-  .kicker{margin:8px 34px 0 0;font-size:26px;font-weight:400;color:var(--soft)}
-  .stamp{position:relative;width:420px;height:150px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+  .title{display:flex;align-items:center;gap:22px;font-size:84px;font-weight:800;line-height:1.1;text-shadow:1px 1px 0 rgba(255,255,255,.5)}
+  .title i{width:20px;height:20px;border-radius:50%;background:#e9a93a;box-shadow:0 0 0 8px rgba(255,255,255,.55),0 0 24px rgba(233,169,58,.6)}
+  .kicker{margin:10px 42px 0 0;font-size:30px;font-weight:400;color:var(--soft)}
+  .stamp{position:relative;width:500px;height:170px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
   .stamp svg{position:absolute;inset:0;width:100%;height:100%;z-index:-1;filter:drop-shadow(0 10px 14px rgba(70,95,150,.22))}
-  .stamp .d{font-size:32px;font-weight:500}.stamp .tm{margin-top:2px;font-size:26px;font-weight:700;color:#3a6fb8}
-  .grid{flex:1;display:grid;gap:20px;margin-top:14px;padding:22px;border-radius:44px;min-height:0;
+  .stamp .d{font-size:38px;font-weight:500}.stamp .tm{margin-top:2px;font-size:30px;font-weight:700;color:#3a6fb8}
+  .grid{flex:1;display:grid;gap:28px;margin-top:24px;padding:32px;border-radius:52px;min-height:0;
     background:radial-gradient(ellipse at 30% 0%,rgba(255,255,255,.85) 0%,rgba(255,255,255,0) 60%),linear-gradient(145deg,rgba(255,255,255,.62),rgba(255,255,255,.34));
     border:1px solid rgba(255,255,255,.85);
     box-shadow:0 40px 80px rgba(70,82,110,.18),0 0 0 6px rgba(255,255,255,.14),inset 2px 2px 3px rgba(255,255,255,.95),inset -2px -2px 6px rgba(170,182,205,.28),inset 0 0 40px rgba(255,255,255,.35)}
@@ -348,34 +357,34 @@ export function buildImageHtml(frame: ImageFrame): string {
   .grid.three{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
   .grid.three .card:first-child{grid-column:1/-1}
   .grid.four{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
-  .card{position:relative;overflow:hidden;min-height:0;display:flex;flex-direction:column;justify-content:center;gap:12px;padding:26px 34px;border-radius:30px;
-    background:linear-gradient(145deg,rgba(255,255,255,.72),rgba(255,255,255,.28));border:1px solid rgba(255,255,255,.72);
-    box-shadow:inset 1px 1px 2px rgba(255,255,255,.9),0 10px 20px rgba(70,82,110,.10)}
-  .top{display:flex;align-items:center;gap:20px}
-  .icon{flex:none;width:64px;height:64px;display:grid;place-items:center;border-radius:20px;font-size:34px;font-weight:800;color:var(--c);
-    background:linear-gradient(145deg,rgba(255,255,255,.85),rgba(255,255,255,.25));border:1px solid rgba(255,255,255,.85);
-    box-shadow:inset 1px 1px 2px #fff,0 5px 12px rgba(70,82,110,.12)}
+  .card{position:relative;overflow:hidden;min-height:0;display:flex;flex-direction:column;justify-content:flex-start;gap:18px;padding:34px 42px;border-radius:34px;
+    background:linear-gradient(145deg,rgba(255,255,255,.78),rgba(255,255,255,.34));border:1px solid rgba(255,255,255,.78);
+    box-shadow:inset 1px 1px 2px rgba(255,255,255,.9),0 12px 24px rgba(70,82,110,.12)}
+  .top{display:flex;align-items:center;gap:22px}
+  .icon{flex:none;width:78px;height:78px;display:grid;place-items:center;border-radius:24px;font-size:44px;font-weight:800;color:var(--c);
+    background:linear-gradient(145deg,rgba(255,255,255,.9),rgba(255,255,255,.28));border:1px solid rgba(255,255,255,.9);
+    box-shadow:inset 1px 1px 2px #fff,0 6px 14px rgba(70,82,110,.14)}
   .txt{min-width:0}
-  h2{font-size:38px;font-weight:700;line-height:1.35;letter-spacing:-.3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-  .sub{margin-top:2px;font-size:20px;font-weight:500;letter-spacing:1.5px;color:var(--soft);direction:ltr;text-align:right}
-  p{font-size:26px;font-weight:400;line-height:1.7;color:#3a4150;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-  .live{align-self:flex-start;display:flex;align-items:center;gap:8px;height:34px;padding:0 14px;border-radius:13px;font-size:18px;font-weight:500;color:var(--up);
-    background:rgba(21,157,120,.09);border:1px solid rgba(21,157,120,.22)}
-  .live::before{content:"";width:9px;height:9px;border-radius:50%;background:var(--up);box-shadow:0 0 0 4px rgba(21,157,120,.18)}
-  .grid.one h2{font-size:62px}.grid.one p{font-size:40px;-webkit-line-clamp:7}.grid.one .icon{width:84px;height:84px;font-size:46px}
-  .grid.two h2{font-size:48px;-webkit-line-clamp:3}.grid.two p{font-size:32px;-webkit-line-clamp:7}
-  .grid.three .card:first-child p{-webkit-line-clamp:2}.grid.three p{-webkit-line-clamp:2}.grid.three h2{font-size:34px}
-  .grid.four h2{font-size:34px}.grid.four p{-webkit-line-clamp:3}
-  .ticker{display:flex;align-items:flex-start;gap:20px;margin-top:14px;padding:16px 28px;border-radius:26px;
-    background:linear-gradient(145deg,rgba(255,255,255,.5),rgba(255,255,255,.24));border:1px solid rgba(255,255,255,.65);
+  h2{font-size:50px;font-weight:800;line-height:1.28;letter-spacing:-.3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:#17202c}
+  .sub{margin-top:5px;font-size:24px;font-weight:600;letter-spacing:1px;color:#596577;direction:ltr;text-align:right}
+  p{font-size:34px;font-weight:500;line-height:1.55;color:#26313f;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+  .live{align-self:flex-start;display:flex;align-items:center;gap:10px;height:40px;padding:0 18px;border-radius:15px;font-size:21px;font-weight:600;color:var(--up);
+    background:rgba(21,157,120,.1);border:1px solid rgba(21,157,120,.25)}
+  .live::before{content:"";width:11px;height:11px;border-radius:50%;background:var(--up);box-shadow:0 0 0 5px rgba(21,157,120,.18)}
+  .grid.one h2{font-size:76px}.grid.one p{font-size:50px;-webkit-line-clamp:7}.grid.one .icon{width:102px;height:102px;font-size:56px}
+  .grid.two h2{font-size:62px;-webkit-line-clamp:3}.grid.two p{font-size:40px;-webkit-line-clamp:6}
+  .grid.three .card:first-child p{-webkit-line-clamp:3}.grid.three p{-webkit-line-clamp:3}.grid.three h2{font-size:46px}
+  .grid.four h2{font-size:44px}.grid.four p{font-size:32px;-webkit-line-clamp:3}
+  .ticker{display:flex;align-items:flex-start;gap:24px;margin-top:18px;padding:20px 34px;border-radius:30px;
+    background:linear-gradient(145deg,rgba(255,255,255,.58),rgba(255,255,255,.28));border:1px solid rgba(255,255,255,.7);
     box-shadow:inset 1px 1px 2px rgba(255,255,255,.9),0 8px 18px rgba(70,82,110,.08)}
-  .tlabel{flex:none;margin-top:3px;font-size:24px;font-weight:800;color:var(--soft)}
-  .titems{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;min-width:0}
-  .ti{max-width:780px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:25px;font-weight:400;line-height:1.55;color:#3a4150}
-  .ti.more{color:var(--soft);font-weight:500}
-  .tdot{flex:none;color:var(--soft);font-size:25px;line-height:1.55;opacity:.7}
-  .foot{display:flex;justify-content:space-between;align-items:center;padding:0 12px;height:92px;font-size:28px;font-weight:500;color:#3d4452}
-  .sig{font-family:'Bitcount Ink',Arial,sans-serif;font-size:34px;font-weight:400;letter-spacing:.8px;direction:ltr;text-shadow:1px 1px 0 rgba(255,255,255,.65)}
+  .tlabel{flex:none;margin-top:3px;font-size:30px;font-weight:800;color:var(--soft)}
+  .titems{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;min-width:0}
+  .ti{max-width:980px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:30px;font-weight:500;line-height:1.55;color:#2d3745}
+  .ti.more{color:var(--soft);font-weight:600}
+  .tdot{flex:none;color:var(--soft);font-size:30px;line-height:1.55;opacity:.7}
+  .foot{display:flex;justify-content:space-between;align-items:center;padding:0 16px;height:104px;font-size:32px;font-weight:600;color:#323b49}
+  .sig{font-family:'Bitcount Ink',Arial,sans-serif;font-size:38px;font-weight:400;letter-spacing:.8px;direction:ltr;text-shadow:1px 1px 0 rgba(255,255,255,.65)}
 </style>
 </head>
 <body>

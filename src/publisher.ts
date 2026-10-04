@@ -6,8 +6,8 @@
  *    source channel are published
  *  - a message is marked published only after Telegram confirms delivery, using
  *    an atomic guarded UPDATE so a repeat run cannot double-publish
- *  - plain text only (no parse_mode), so untrusted summary content can never
- *    break Telegram formatting
+ *  - news digests use Telegram HTML formatting; every AI/source value is escaped
+ *    before it is inserted, so untrusted content can never break the markup
  *  - rate limits stop the pass instead of hammering; leftovers retry next hour
  */
 
@@ -23,6 +23,7 @@ import {
   type DestinationChat,
 } from './telegram';
 import type { Env } from './types';
+import { topicPresentation } from './topic';
 
 /**
  * Telegram/API safety bound — NOT a product limit.
@@ -66,9 +67,21 @@ export function publishMessageBudget(enabledChannelCount: number): number {
 }
 
 const TELEGRAM_TEXT_LIMIT = 4096;
-const MAX_SUMMARY_CHARS = 1200;
+/** Kept below Telegram's limit so HTML tags and topic details always fit. */
+const MAX_SUMMARY_CHARS = 1050;
 /** AI headlines are short by contract; this only guards the 4096 limit. */
-const MAX_TITLE_CHARS = 200;
+const MAX_TITLE_CHARS = 180;
+const MAX_HIGHLIGHT_CHARS = 120;
+const MAX_HIGHLIGHTS = 3;
+
+/** Telegram HTML escaping for AI and RSS text. */
+export function escapeTelegramHtml(value: string): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 
 /** Only original public-channel post links are ever published. */
 const SOURCE_URL_RE = /^https:\/\/t\.me\/[A-Za-z][A-Za-z0-9_]{4,31}\/\d{1,20}$/;
@@ -115,6 +128,10 @@ export interface PublishableMessage {
   title: string | null;
   /** AI global importance 1-5. NULL until the ranking stage has run. */
   importance: number | null;
+  /** AI editorial topic used for the digest emoji and image accent. */
+  category?: string | null;
+  /** Optional AI key points, stored as JSON and treated as display data only. */
+  highlights?: string[];
   messageDate: string;
   sourceUrl: string;
 }
@@ -234,7 +251,7 @@ export async function selectPublishableMessages(db: D1Database): Promise<Publish
   const { results } = await db
     .prepare(
       `SELECT m.id, m.source_channel_id, c.channel_username, c.channel_title, c.source_type, m.telegram_message_id,
-              m.summary_text, m.title, m.importance, m.message_date, m.source_url
+              m.summary_text, m.title, m.importance, m.category, m.highlights_json, m.message_date, m.source_url
          FROM messages m
          JOIN channels c ON c.id = m.source_channel_id
         WHERE c.enabled = 1
@@ -255,6 +272,8 @@ export async function selectPublishableMessages(db: D1Database): Promise<Publish
       summary_text: string;
       title: string | null;
       importance: number | null;
+      category: string | null;
+      highlights_json: string | null;
       message_date: string;
       source_url: string;
     }>();
@@ -269,9 +288,27 @@ export async function selectPublishableMessages(db: D1Database): Promise<Publish
     summaryText: r.summary_text,
     title: r.title ?? null,
     importance: r.importance ?? null,
+    category: r.category ?? null,
+    highlights: parseHighlights(r.highlights_json),
     messageDate: r.message_date,
     sourceUrl: r.source_url,
   }));
+}
+
+/** Parses AI key points defensively; malformed legacy data is simply omitted. */
+function parseHighlights(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, MAX_HIGHLIGHTS);
+  } catch {
+    return [];
+  }
 }
 
 /** One source channel and its publishable news, oldest first. */
@@ -354,83 +391,117 @@ export function destinationLabel(raw: string | undefined): string {
 }
 
 /**
- * Builds the digest for one channel.
+ * Builds an HTML-formatted digest for one source channel.
  *
- * Layout — no header; the channel appears only as publishing metadata in the
- * footer, which is repeated in every part when the size limit forces a split:
+ * Each story deliberately contains both the AI headline and its full summary.
+ * The topic emoji comes from the AI category, while every value originating in
+ * D1 is escaped before it is sent with Telegram's HTML parse mode.
  *
- *   summary 1
+ * Layout:
  *
- *   summary 2
+ *   🏛️ <b>Headline</b>
+ *   📝 <b>خلاصه:</b> The complete detail...
+ *   🔎 <b>نکات مهم:</b> point one · point two
  *
- *   منبع: @news_one
- *   @destination_channel
- *
- * Length accounting includes every summary, the blank lines and both footer
- * lines, so a rendered part never exceeds Telegram's 4096 limit. Only that limit
- * can split a channel, and a summary is never cut to make a digest fit — a new
- * part is started instead. The degenerate case of one summary too long to fit
- * alone is trimmed deterministically so the footer always survives.
+ *   📡 <i>منبع: @source</i>
+ *   📣 <i>@destination</i>
  */
 export function buildChannelDigest(
   channelName: string,
   destination: string,
-  items: { id: number; summaryText: string; title?: string | null }[]
+  items: {
+    id: number;
+    summaryText: string;
+    title?: string | null;
+    category?: string | null;
+    highlights?: string[];
+  }[]
 ): DigestPart[] {
   const name = channelName.trim();
   if (!name) return [];
 
-  const SEP = '\n\n';
-  const footer = `منبع: ${sourceLabel(name)}${destination ? `\n${destination}` : ''}`;
-  const overhead = SEP.length + footer.length;
-  const maxSummaryLength = Math.max(1, TELEGRAM_TEXT_LIMIT - overhead);
+  const separator = '\n\n';
+  const source = escapeTelegramHtml(sourceLabel(name));
+  const displayedDestination = destination.trim() ? escapeTelegramHtml(destination.trim()) : '';
+  const footer = `📡 <i>منبع: ${source}</i>${displayedDestination ? `\n📣 <i>${displayedDestination}</i>` : ''}`;
+  const overhead = separator.length + footer.length;
+  const maxBodyLength = Math.max(1, TELEGRAM_TEXT_LIMIT - overhead);
 
   const prepared = items
-    .map((i) => {
-      const summary = sanitizeText(i.summaryText, Math.min(MAX_SUMMARY_CHARS, maxSummaryLength));
-      // The AI headline, when present, is printed above the very same summary the
-      // image shows. Legacy rows without a title keep the previous format.
-      const title = i.title ? sanitizeText(i.title, MAX_TITLE_CHARS).replace(/\n+/g, ' ').trim() : '';
-      return { id: i.id, title, summary, body: title ? `${title}\n${summary}` : summary };
+    .map((item) => {
+      const summary = sanitizeText(item.summaryText, Math.min(MAX_SUMMARY_CHARS, maxBodyLength));
+      const title = item.title
+        ? sanitizeText(item.title, MAX_TITLE_CHARS).replace(/\n+/g, ' ').trim()
+        : '';
+      const highlights = (item.highlights ?? [])
+        .map((highlight) => sanitizeText(highlight, MAX_HIGHLIGHT_CHARS).replace(/\n+/g, ' ').trim())
+        .filter(Boolean)
+        .slice(0, MAX_HIGHLIGHTS);
+      const topic = topicPresentation(item.category, `${title} ${summary}`);
+
+      const heading = title
+        ? `${topic.emoji} <b>${escapeTelegramHtml(title)}</b>`
+        : `${topic.emoji} <b>خبر ${escapeTelegramHtml(topic.label)}</b>`;
+      const detail = `📝 <b>خلاصه:</b> ${escapeTelegramHtml(summary)}`;
+      const keyPoints = highlights.length > 0
+        ? `\n🔎 <b>نکات مهم:</b> ${highlights.map(escapeTelegramHtml).join(' · ')}`
+        : '';
+      const body = `${heading}\n${detail}${keyPoints}`;
+      return { id: item.id, body, summary, title, highlights, topic };
     })
-    .filter((i) => i.body.length > 0);
+    .filter((item) => item.summary.length > 0 || item.title.length > 0);
   if (prepared.length === 0) return [];
 
-  // Greedy packing on the true rendered length (body + footer + separators).
+  // A normal AI response is comfortably below the limit. This compact fallback
+  // also protects the Bot API limit when legacy data contains a large amount of
+  // HTML-sensitive text that expands while escaped.
+  for (const item of prepared) {
+    if (item.body.length <= maxBodyLength) continue;
+    const compactSummary = sanitizeText(item.summary, 600);
+    const compactTitle = sanitizeText(item.title, 120).replace(/\n+/g, ' ').trim();
+    const topic = item.topic;
+    const heading = compactTitle
+      ? `${topic.emoji} <b>${escapeTelegramHtml(compactTitle)}</b>`
+      : `${topic.emoji} <b>خبر ${escapeTelegramHtml(topic.label)}</b>`;
+    item.body = `${heading}\n📝 <b>خلاصه:</b> ${escapeTelegramHtml(compactSummary)}`;
+  }
+
+  // Greedy packing on the actual HTML source length. The Bot API measures the
+  // resulting message, so conservative accounting of tags keeps every part
+  // under 4096 characters even when a digest is split.
   const chunks: { id: number; body: string }[][] = [];
   let current: { id: number; body: string }[] = [];
   let used = overhead;
 
   for (const item of prepared) {
-    const addition = item.body.length + (current.length > 0 ? SEP.length : 0);
+    const addition = item.body.length + (current.length > 0 ? separator.length : 0);
     if (current.length > 0 && used + addition > TELEGRAM_TEXT_LIMIT) {
       chunks.push(current);
       current = [item];
       used = overhead + item.body.length;
     } else {
-      current = [...current, item];
+      current = [...current, { id: item.id, body: item.body }];
       used += addition;
     }
   }
   if (current.length > 0) chunks.push(current);
 
   return chunks.map((chunk) => ({
-    text: `${chunk.map((c) => c.body).join(SEP)}${SEP}${footer}`,
-    itemIds: chunk.map((c) => c.id),
+    text: `${chunk.map((item) => item.body).join(separator)}${separator}${footer}`,
+    itemIds: chunk.map((item) => item.id),
   }));
 }
 
-/** Plain-text sanitizer: drops control characters, normalizes whitespace. */
+/** Plain-text sanitizer used before HTML escaping. */
 function sanitizeText(text: string, limit: number): string {
-  const cleaned = text
-    // Strips C0/C1 control chars except tab and newline; plain text can never
-    // be interpreted as Telegram formatting.
+  const cleaned = String(text ?? '')
+    // Strips C0/C1 control chars except tab and newline.
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     .replace(/\r\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  return cleaned.length > limit ? `${cleaned.slice(0, limit - 1).trimEnd()}…` : cleaned;
+  return cleaned.length > limit ? `${cleaned.slice(0, Math.max(1, limit - 1)).trimEnd()}…` : cleaned;
 }
 
 /**
@@ -586,6 +657,7 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
           token: opts.token!,
           chatId: destination,
           text: part.text,
+          parseMode: 'HTML',
           fetchImpl: opts.fetchImpl,
           baseUrl: opts.baseUrl,
         });
@@ -610,6 +682,7 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
               token: bale.token,
               chatId: bale.destination,
               text: part.text,
+              parseMode: 'HTML',
               fetchImpl: opts.fetchImpl,
             });
             baleCounters.sent++;
