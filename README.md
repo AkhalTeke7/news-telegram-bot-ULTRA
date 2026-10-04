@@ -59,6 +59,8 @@ Migrations, in order:
 | `0006_telegram_admin.sql` | `telegram_admin_state` (short-lived D1 conversation state) |
 | `0007_ad_filter.sql` | `messages.filter_status` / `filter_reason` / `filtered_at`, `cron_runs.messages_filtered` |
 | `0008_title_importance.sql` | AI `title` and global `importance` (1–5) for ranking/image selection |
+| `0009_ai_editorial_metadata.sql` | AI highlights, confidence, category, processing timestamp, and ranking indexes |
+| `0010_rss_sources.sql` | Configurable BBC Persian, technology, and Iranian RSS source registry |
 
 ## 2. Telegram bot setup
 
