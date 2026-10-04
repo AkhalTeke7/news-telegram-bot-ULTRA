@@ -190,6 +190,23 @@ describe('sendTestImage', () => {
     // (quickAction payload is asserted through the html the browser receives.)
   });
 
+  it('mirrors the test image to Bale when the mirror is configured', async () => {
+    await seedNews(2);
+    const h = harness();
+
+    const result = await sendTestImage(
+      baseEnv({ BROWSER: h.browser, BALE_BOT_TOKEN: 'bale-token', BALE_DESTINATION_CHANNEL: '@bale_dest' }),
+      { fetchImpl: h.fetchImpl }
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.bale).toEqual({ sent: true });
+    const urls = h.calls.map((c) => c.url);
+    // Standard bot base — never the restricted /business/ endpoint.
+    expect(urls).toContain('https://tapi.bale.ai/botbale-token/sendPhoto');
+    expect(urls.some((u) => u.includes('/business/'))).toBe(false);
+  });
+
   it('marks NOTHING published — the rows stay pending for the real run', async () => {
     await seedNews(3);
     const h = harness();

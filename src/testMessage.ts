@@ -13,7 +13,8 @@
  *    message with a stable category, mirroring the publisher's error model.
  */
 
-import { resolveDestination } from './publisher';
+import { baleSendMessage } from './bale';
+import { resolveBaleDelivery, resolveDestination } from './publisher';
 import {
   sendMessage,
   TelegramError,
@@ -31,10 +32,22 @@ export type TestMessageErrorCategory =
   | 'network'
   | 'telegram_error';
 
+/**
+ * Outcome of the best-effort Bale mirror of a test send. Present only when
+ * the Bale mirror is configured; `reason` is a safe error summary (HTTP
+ * status / timeout), never the token or the destination value.
+ */
+export interface BaleTestOutcome {
+  sent: boolean;
+  reason?: string;
+}
+
 export interface TestMessageSuccess {
   ok: true;
   /** Message id Telegram assigned to the delivered test message. */
   messageId: number;
+  /** Bale mirror outcome; absent when Bale is not configured. */
+  bale?: BaleTestOutcome;
 }
 
 export interface TestMessageFailure {
@@ -138,22 +151,50 @@ export async function sendTestMessage(
     };
   }
 
+  const text = buildTestMessageText(opts.now);
   try {
     const sent = await sendMessage({
       token,
       chatId: destination,
-      text: buildTestMessageText(opts.now),
+      text,
       // A diagnostic should not buzz subscribers who keep notifications on.
       disableNotification: true,
       fetchImpl: opts.fetchImpl,
       baseUrl: opts.baseUrl,
     });
     logTestMessage('ok', { messageId: sent.message_id });
-    return { ok: true, messageId: sent.message_id };
+    // Best-effort Bale mirror, exactly like the publisher: lets the admin
+    // verify the Bale token + destination with the same button. A Bale
+    // failure never turns the (delivered) Telegram test into an error.
+    const bale = await mirrorTestToBale(env, text, opts.fetchImpl);
+    return bale ? { ok: true, messageId: sent.message_id, bale } : { ok: true, messageId: sent.message_id };
   } catch (error) {
     const { category, message } = describeTelegramError(error);
     logTestMessage('error', { category });
     return { ok: false, category, message };
+  }
+}
+
+/**
+ * Mirrors a delivered test message to Bale when the mirror is configured.
+ * Returns undefined when Bale is not configured, so the result shape is
+ * unchanged for Telegram-only deployments.
+ */
+async function mirrorTestToBale(
+  env: Env,
+  text: string,
+  fetchImpl?: typeof fetch
+): Promise<BaleTestOutcome | undefined> {
+  const bale = resolveBaleDelivery(env);
+  if (!bale) return undefined;
+  try {
+    await baleSendMessage({ token: bale.token, chatId: bale.destination, text, fetchImpl });
+    logTestMessage('bale_ok');
+    return { sent: true };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    logTestMessage('bale_error', { reason });
+    return { sent: false, reason };
   }
 }
 

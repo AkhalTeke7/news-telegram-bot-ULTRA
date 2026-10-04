@@ -417,6 +417,7 @@ export function renderTestImageResult(result: TestImageResult): string {
       `سایر عناوین (نوار): ${result.ticker}`,
       `حجم تصویر: ${Math.max(1, Math.round(result.bytes / 1024))} کیلوبایت`,
       `زمان رندر: ${result.browserRunMs} میلی‌ثانیه`,
+      ...(result.bale ? [result.bale.sent ? 'بیل: ارسال شد ✅' : 'بیل: ناموفق ❌'] : []),
     ].join('\n');
   }
   const header = result.category === 'no_news' ? '⚠️ تصویری ساخته نشد.' : '❌ ارسال تصویر آزمایشی ناموفق بود.';
@@ -431,7 +432,12 @@ export function renderTestImageResult(result: TestImageResult): string {
  */
 export function renderTestMessageResult(result: TestMessageResult): string {
   if (result.ok) {
-    return ['✅ پیام آزمایشی به کانال مقصد ارسال شد.', '', `شناسه پیام: ${result.messageId}`].join('\n');
+    return [
+      '✅ پیام آزمایشی به کانال مقصد ارسال شد.',
+      '',
+      `شناسه پیام: ${result.messageId}`,
+      ...(result.bale ? [result.bale.sent ? 'بیل: ارسال شد ✅' : 'بیل: ناموفق ❌'] : []),
+    ].join('\n');
   }
   const hint =
     result.category === 'telegram_error'

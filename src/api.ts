@@ -293,7 +293,9 @@ export function createApi(): Hono<Bindings> {
   app.post('/api/telegram/test-message', async (c) => {
     const result = await sendTestMessage(c.env);
     if (result.ok) {
-      return c.json({ ok: true, messageId: result.messageId });
+      // `bale` is present only when the Bale mirror is configured; it reports
+      // delivery only, never the destination or token.
+      return c.json({ ok: true, messageId: result.messageId, ...(result.bale ? { bale: result.bale } : {}) });
     }
     switch (result.category) {
       case 'destination_not_configured':
@@ -322,6 +324,7 @@ export function createApi(): Hono<Bindings> {
         cards: result.cards,
         ticker: result.ticker,
         bytes: result.bytes,
+        ...(result.bale ? { bale: result.bale } : {}),
       });
     }
     switch (result.category) {

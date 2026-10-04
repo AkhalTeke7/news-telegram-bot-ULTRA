@@ -17,10 +17,11 @@
  * only from the server-side environment, never echoed, logged or stored.
  */
 
+import { baleSendPhoto } from './bale';
 import { NewsImageError, renderRunImage, type BrowserBinding } from './newsImage';
-import { resolveDestination, selectPublishableMessages } from './publisher';
+import { resolveBaleDelivery, resolveDestination, selectPublishableMessages } from './publisher';
 import { sendPhoto, TelegramError } from './telegram';
-import { describeTelegramError, type TestMessageErrorCategory } from './testMessage';
+import { describeTelegramError, type BaleTestOutcome, type TestMessageErrorCategory } from './testMessage';
 import type { Env } from './types';
 
 /** Telegram command that triggers the image-only test. */
@@ -47,6 +48,8 @@ export interface TestImageSuccess {
   bytes: number;
   /** How long the Browser Run screenshot took, in milliseconds. */
   browserRunMs: number;
+  /** Bale mirror outcome; absent when Bale is not configured. */
+  bale?: BaleTestOutcome;
 }
 
 export interface TestImageFailure {
@@ -160,6 +163,9 @@ export async function sendTestImage(
       ticker: rendered.tickerCount,
       bytes: rendered.bytes,
     });
+    // Best-effort Bale mirror of the very same PNG, so this button also
+    // verifies the Bale token + destination. Never affects the Telegram result.
+    const bale = await mirrorTestImageToBale(env, rendered.png, opts.fetchImpl);
     return {
       ok: true,
       messageId: sent.message_id,
@@ -167,6 +173,7 @@ export async function sendTestImage(
       ticker: rendered.tickerCount,
       bytes: rendered.bytes,
       browserRunMs: rendered.browserRunMs,
+      ...(bale ? { bale } : {}),
     };
   } catch (error) {
     if (error instanceof TelegramError || error instanceof Error) {
@@ -179,6 +186,25 @@ export async function sendTestImage(
       category: 'telegram_error',
       message: 'ارسال تصویر با خطای نامشخص مواجه شد.',
     };
+  }
+}
+
+/** Mirrors the test PNG to Bale; undefined when Bale is not configured. */
+async function mirrorTestImageToBale(
+  env: Env,
+  png: ArrayBuffer,
+  fetchImpl?: typeof fetch
+): Promise<BaleTestOutcome | undefined> {
+  const bale = resolveBaleDelivery(env);
+  if (!bale) return undefined;
+  try {
+    await baleSendPhoto({ token: bale.token, chatId: bale.destination, photo: png, fetchImpl });
+    logTestImage('bale_ok');
+    return { sent: true };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    logTestImage('bale_error', { reason });
+    return { sent: false, reason };
   }
 }
 

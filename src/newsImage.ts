@@ -92,7 +92,7 @@ export interface ImageFrame {
   time: string;
   /** Pre-formatted source line, e.g. `منبع: @a` or `منابع: @a · @b`. */
   footer: string;
-  /** Brand signature in the footer corner; defaults to `Akhal-Teke`. */
+  /** Brand signature in the footer corner; defaults to `Akhal-Teke / DwAArKa`. */
   signature?: string;
   items: ImageNewsItem[];
   /** Remaining headlines for the ticker strip; absent when there are none. */
@@ -405,7 +405,7 @@ export function buildImageHtml(frame: ImageFrame): string {
         .map((t) => `<span class="ti${t.more ? ' more' : ''}">${esc(t.text)}</span>`)
         .join('<span class="tdot">·</span>')}</div>
     </section>` : ''}
-    <div class="foot"><span>${esc(frame.footer)}</span><span class="sig">${esc(frame.signature ?? 'Akhal-Teke')}</span></div>
+    <div class="foot"><span>${esc(frame.footer)}</span><span class="sig">${esc(frame.signature ?? 'Akhal-Teke / DwAArKa')}</span></div>
   </div>
 </body>
 </html>`;

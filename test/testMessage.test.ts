@@ -157,6 +157,59 @@ describe('sendTestMessage', () => {
     expect(String(t.calls[0].body.text)).toContain('پیام آزمایشی');
   });
 
+  it('mirrors the test message to Bale via the standard bot API', async () => {
+    const t = telegramOk(4242);
+    const result = await sendTestMessage(
+      baseEnv({ BALE_BOT_TOKEN: 'bale-token', BALE_DESTINATION_CHANNEL: '@bale_dest' }),
+      { fetchImpl: t.fetchImpl }
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.bale).toEqual({ sent: true });
+
+    const bale = t.calls.filter((c) => c.url.includes('tapi.bale.ai'));
+    expect(bale).toHaveLength(1);
+    // Standard bot base (docs.bale.ai) — the /business/ base rejects normal tokens.
+    expect(bale[0].url).toBe('https://tapi.bale.ai/botbale-token/sendMessage');
+    expect(bale[0].body.chat_id).toBe('@bale_dest');
+    // The mirror carries exactly the text Telegram received.
+    const telegram = t.calls.find((c) => c.url.includes('api.telegram.org'));
+    expect(bale[0].body.text).toBe(telegram?.body.text);
+  });
+
+  it('a Bale failure never fails a delivered Telegram test message', async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('tapi.bale.ai')) return new Response('forbidden', { status: 403 });
+      return new Response(
+        JSON.stringify({ ok: true, result: { message_id: 11, date: 1 } }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await sendTestMessage(
+      baseEnv({ BALE_BOT_TOKEN: 'bale-token', BALE_DESTINATION_CHANNEL: '@bale_dest' }),
+      { fetchImpl }
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.bale?.sent).toBe(false);
+      expect(result.bale?.reason).toContain('403');
+      // The reason never leaks the token or the destination.
+      expect(result.bale?.reason).not.toContain('bale-token');
+      expect(result.bale?.reason).not.toContain('bale_dest');
+    }
+  });
+
+  it('reports no Bale outcome when the mirror is not configured', async () => {
+    const t = telegramOk();
+    const result = await sendTestMessage(baseEnv(), { fetchImpl: t.fetchImpl });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.bale).toBeUndefined();
+    expect(t.calls.every((c) => !c.url.includes('tapi.bale.ai'))).toBe(true);
+  });
+
   it('fails safely when the destination is not configured', async () => {
     const fetchImpl = vi.fn();
     const result = await sendTestMessage(

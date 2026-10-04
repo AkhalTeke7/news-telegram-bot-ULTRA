@@ -7,7 +7,15 @@
  * never affects Telegram delivery or publish state.
  */
 
-const BALE_API = 'https://tapi.bale.ai/business/bot';
+/**
+ * Standard Bale Bot API base (docs.bale.ai): `https://tapi.bale.ai/bot<TOKEN>`.
+ *
+ * Deliberately NOT the `/business/bot` variant: that base is only enabled for
+ * accounts with Bale's bulk-messaging (کسب‌وکاری) eligibility and rejects every
+ * call from a normal bot token — which made the mirror silently deliver
+ * nothing. The standard base works for every bot created with Bale BotFather.
+ */
+const BALE_API = 'https://tapi.bale.ai/bot';
 
 /** Bounded so one slow Bale call cannot consume the invocation budget. */
 export const BALE_TIMEOUT_MS = 15_000;
@@ -35,7 +43,9 @@ export async function baleSendPhoto(
   body.append('photo', new Blob([opts.photo], { type: 'image/png' }), 'news.png');
 
   const response = await (opts.fetchImpl ?? fetch)(
-    `${BALE_API}${encodeURIComponent(opts.token)}/sendPhoto`,
+    // Raw token, exactly like the Telegram transport: Bale tokens contain a
+    // ':' and the documented URL shape uses it unencoded.
+    `${BALE_API}${opts.token}/sendPhoto`,
     {
       method: 'POST',
       body,
@@ -53,7 +63,7 @@ async function call(
   payload: Record<string, unknown>
 ): Promise<void> {
   const response = await (opts.fetchImpl ?? fetch)(
-    `${BALE_API}${encodeURIComponent(opts.token)}/${method}`,
+    `${BALE_API}${opts.token}/${method}`,
     {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

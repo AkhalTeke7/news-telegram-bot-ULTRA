@@ -858,6 +858,29 @@ describe('Bale mirror', () => {
     expect(h.telegramTexts).toHaveLength(2);
   });
 
+  it('calls the standard Bale bot API, never the business endpoint', async () => {
+    await seedTwoChannels();
+    const h = dualHarness();
+    await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      bale: BALE,
+    });
+
+    const baleCalls = (h.fetchMock as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => String(c[0]))
+      .filter((u) => u.includes('tapi.bale.ai'));
+    expect(baleCalls.length).toBeGreaterThan(0);
+    for (const url of baleCalls) {
+      // The /business/bot base is restricted to bulk-messaging accounts and
+      // rejects normal bot tokens — it must never be used for the mirror.
+      expect(url.startsWith(`https://tapi.bale.ai/bot${BALE.token}/`)).toBe(true);
+      expect(url).not.toContain('/business/');
+      expect(url).not.toContain('%3A');
+    }
+  });
+
   it('makes no Bale calls when the mirror is not configured', async () => {
     await seedTwoChannels();
     const h = dualHarness();
