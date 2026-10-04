@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 import wranglerConfig from '../wrangler.json';
 
 describe('wrangler config', () => {
-  it('declares the hourly cron trigger (start of each Iranian hour)', () => {
+  it('declares the bi-hourly cron trigger (every other Iranian hour)', () => {
     // Cloudflare cron is UTC-only; Iran is UTC+03:30, so :30 UTC == :00 Tehran.
-    expect(wranglerConfig.triggers.crons).toEqual(['30 * * * *']);
+    expect(wranglerConfig.triggers.crons).toEqual(['30 */2 * * *']);
   });
 
   it('binds D1 with a migrations dir and keeps secrets out of config', () => {

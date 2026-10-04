@@ -26,6 +26,16 @@ import { runNewsPipeline } from './pipeline';
 import { getChannelStats, getStatusReport } from './status';
 import { addSourceChannel } from './sourceChannels';
 import { getSetting } from './settings';
+import {
+  sendTestImage,
+  TEST_IMAGE_COMMAND,
+  type TestImageResult,
+} from './testImage';
+import {
+  sendTestMessage,
+  TEST_MESSAGE_COMMAND,
+  type TestMessageResult,
+} from './testMessage';
 import { formatTehranDateTimeOrDash } from './time';
 import type { Env } from './types';
 
@@ -152,6 +162,10 @@ export function menuKeyboard(): InlineKeyboardMarkup {
       [
         { text: '📰 پردازش دستی', callback_data: 'run:ask' },
         { text: '❌ لغو', callback_data: 'no' },
+      ],
+      [
+        { text: '🧪 پیام آزمایشی', callback_data: 'msg:test' },
+        { text: '🖼 تصویر آزمایشی', callback_data: 'img:test' },
       ],
     ],
   };
@@ -308,13 +322,51 @@ async function renderChannelList(env: Env): Promise<string> {
   return lines.join('\n');
 }
 
+/**
+ * Admin-facing report for the image-only test. Success lists what the image
+ * contains (cards, ticker lines, size, render time); failure repeats the safe
+ * Persian reason from sendTestImage.
+ */
+export function renderTestImageResult(result: TestImageResult): string {
+  if (result.ok) {
+    return [
+      '✅ تصویر آزمایشی به کانال مقصد ارسال شد.',
+      '',
+      `شناسه پیام: ${result.messageId}`,
+      `خبرهای اصلی (کارت): ${result.cards}`,
+      `سایر عناوین (نوار): ${result.ticker}`,
+      `حجم تصویر: ${Math.max(1, Math.round(result.bytes / 1024))} کیلوبایت`,
+      `زمان رندر: ${result.browserRunMs} میلی‌ثانیه`,
+    ].join('\n');
+  }
+  const header = result.category === 'no_news' ? '⚠️ تصویری ساخته نشد.' : '❌ ارسال تصویر آزمایشی ناموفق بود.';
+  return [header, '', result.message].join('\n');
+}
+
+/**
+ * Admin-facing report for a test-message attempt. Success includes the
+ * destination message id; failure repeats the safe Persian reason from
+ * sendTestMessage and, when Telegram rejected the send, the most common
+ * cause (the bot is not an admin of the destination channel).
+ */
+export function renderTestMessageResult(result: TestMessageResult): string {
+  if (result.ok) {
+    return ['✅ پیام آزمایشی به کانال مقصد ارسال شد.', '', `شناسه پیام: ${result.messageId}`].join('\n');
+  }
+  const hint =
+    result.category === 'telegram_error'
+      ? '\nمعمول‌ترین دلیل: ربات ادمین کانال مقصد با دسترسی ارسال پیام نیست.'
+      : '';
+  return ['❌ ارسال پیام آزمایشی ناموفق بود.', '', result.message + hint].join('\n');
+}
+
 export function renderPipelineResult(outcome: {
   status: string;
   ranAt: string;
   collection: { inserted: number } | null;
   filteredAdvertisements: number;
   summarization: { summarized: number } | null;
-  publishing: { published: number } | null;
+  publishing: { published: number; bale?: { sent: number; failed: number } } | null;
   itemFailures: number;
   durationMs: number;
 }): string {
@@ -333,6 +385,13 @@ export function renderPipelineResult(outcome: {
     `فیلتر تبلیغات: ${outcome.filteredAdvertisements}`,
     `خلاصه‌سازی: ${outcome.summarization?.summarized ?? 0}`,
     `انتشار: ${outcome.publishing?.published ?? 0}`,
+    ...(outcome.publishing?.bale
+      ? [`بیل: ${outcome.publishing.bale.sent} ارسال${
+          outcome.publishing.bale.failed > 0
+            ? `، ${outcome.publishing.bale.failed} خطا`
+            : ''
+        }`]
+      : []),
     `خطا: ${outcome.itemFailures}`,
     `مدت: ${faDuration(outcome.durationMs)}`,
   ].join('\n');
@@ -353,7 +412,7 @@ export function parseCallbackData(raw: unknown): ParsedCallback | null {
   const action = parts[0];
   if (!action) return null;
 
-  const ALLOWED = new Set(['menu', 'no', 'ch', 'sys', 'run']);
+  const ALLOWED = new Set(['menu', 'no', 'ch', 'sys', 'run', 'msg', 'img']);
   if (!ALLOWED.has(action)) return null;
 
   const sub = parts[1] ?? '';
@@ -366,6 +425,8 @@ export function parseCallbackData(raw: unknown): ParsedCallback | null {
   if (action === 'ch' && sub === 'add') return { action: 'ch:add', arg: null };
   if (action === 'sys' && ['status', 'ai', 'last'].includes(sub)) return { action: `sys:${sub}`, arg: null };
   if (action === 'run' && ['ask', 'yes', 'no'].includes(sub)) return { action: `run:${sub}`, arg: null };
+  if (action === 'msg' && sub === 'test') return { action: 'msg:test', arg: null };
+  if (action === 'img' && sub === 'test') return { action: 'img:test', arg: null };
   if (action === 'menu' || action === 'no') return { action, arg: null };
   return null;
 }
@@ -466,6 +527,22 @@ async function handleMessage(message: TelegramMessage, env: Env, deps: { send: S
   if (text === '/cancel') {
     await clearAdminState(env.DB, message.chat.id);
     await deps.send(chatId, 'لغو شد.', menuKeyboard());
+    return;
+  }
+
+  // Runs before the pending-state checks so /test behaves like /start and
+  // /cancel: it is always a command, never interpreted as channel input.
+  if (text === TEST_MESSAGE_COMMAND || text === `${TEST_MESSAGE_COMMAND}@${env.TELEGRAM_BOT_USERNAME ?? ''}`) {
+    const result = await sendTestMessage(env);
+    await deps.send(chatId, renderTestMessageResult(result), menuKeyboard());
+    return;
+  }
+
+  // Image-only test: renders the REAL pending news and sends just the picture.
+  // Also before the pending-state checks, for the same reason as /test.
+  if (text === TEST_IMAGE_COMMAND || text === `${TEST_IMAGE_COMMAND}@${env.TELEGRAM_BOT_USERNAME ?? ''}`) {
+    const result = await sendTestImage(env);
+    await deps.send(chatId, renderTestImageResult(result), menuKeyboard());
     return;
   }
 
@@ -702,6 +779,22 @@ async function handleCallback(
       await ack('لغو شد.');
       await clearAdminState(env.DB, query.message!.chat.id);
       await editTarget(MENU_TEXT, menuKeyboard());
+      return;
+    }
+    case 'msg:test': {
+      // One quick Telegram round-trip, so this is safe to run inline (unlike
+      // the manual pipeline run, which needs ctx.waitUntil).
+      await ack('در حال ارسال پیام آزمایشی…');
+      const result = await sendTestMessage(env);
+      await editTarget(renderTestMessageResult(result), menuKeyboard());
+      return;
+    }
+    case 'img:test': {
+      // One Browser Run request plus one sendPhoto; still a single bounded
+      // round-trip, safe to run inline like msg:test.
+      await ack('در حال ساخت و ارسال تصویر…');
+      const result = await sendTestImage(env);
+      await editTarget(renderTestImageResult(result), menuKeyboard());
       return;
     }
     default:

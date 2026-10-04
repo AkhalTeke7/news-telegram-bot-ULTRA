@@ -5,8 +5,10 @@ import {
   channelDisplayName,
   destinationLabel,
   groupByChannel,
+  isValidBaleDestination,
   MAX_MESSAGES_PER_RUN,
   publishMessageBudget,
+  resolveBaleDelivery,
   runPublishing,
   selectPublishableMessages,
   type PublishableMessage,
@@ -620,3 +622,170 @@ describe('manual processing uses the same behavior', () => {
     expect(t.sent[1].text).toBe('ج\n\nمنبع: @manual_b\n@destination');
   });
 });
+
+describe('Bale mirror', () => {
+  const BALE = { token: 'bale-token', destination: '@bale_dest' };
+
+  beforeEach(reset);
+
+  it('validates Bale destinations', () => {
+    expect(isValidBaleDestination('@chan')).toBe(true);
+    expect(isValidBaleDestination('@Chan_123')).toBe(true);
+    expect(isValidBaleDestination('-1001234567890')).toBe(true);
+    expect(isValidBaleDestination('12345')).toBe(true);
+    expect(isValidBaleDestination('not a channel')).toBe(false);
+    expect(isValidBaleDestination('@a')).toBe(false);
+  });
+
+  it('resolves only when both Bale secrets are set', () => {
+    expect(
+      resolveBaleDelivery({ BALE_BOT_TOKEN: 't', BALE_DESTINATION_CHANNEL: '@chan' } as never)
+    ).toEqual({ token: 't', destination: '@chan' });
+    expect(resolveBaleDelivery({ BALE_BOT_TOKEN: 't' } as never)).toBeNull();
+    expect(resolveBaleDelivery({ BALE_DESTINATION_CHANNEL: '@chan' } as never)).toBeNull();
+    expect(
+      resolveBaleDelivery({ BALE_BOT_TOKEN: 't', BALE_DESTINATION_CHANNEL: 'bad value' } as never)
+    ).toBeNull();
+  });
+
+  /** Distinguishes Bale (tapi.bale.ai) from Telegram (api.telegram.org) calls. */
+  function dualHarness(baleStatus = 200) {
+    const baleTexts: string[] = [];
+    const balePhotos: number[] = [];
+    const telegramTexts: string[] = [];
+    const telegramPhotos: number[] = [];
+    const fetchMock = vi.fn(async (url: unknown) => {
+      const href = String(url);
+      const ok = href.includes('tapi.bale.ai') ? baleStatus < 400 : true;
+      if (href.includes('tapi.bale.ai') && href.includes('sendPhoto')) {
+        if (ok) balePhotos.push(1);
+        return new Response(ok ? '{}' : 'err', { status: baleStatus });
+      }
+      if (href.includes('tapi.bale.ai') && href.includes('sendMessage')) {
+        if (ok) baleTexts.push('x');
+        return new Response(ok ? '{}' : 'err', { status: baleStatus });
+      }
+      if (href.includes('sendPhoto')) {
+        telegramPhotos.push(1);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 501 } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      telegramTexts.push('x');
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 601 } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      fetchMock,
+      baleTexts,
+      balePhotos,
+      telegramTexts,
+      telegramPhotos,
+    };
+  }
+
+  async function seedTwoChannels() {
+    const a = await env.DB.prepare(
+      `INSERT INTO channels (channel_username, enabled) VALUES ('bale_a', 1)`
+    ).run();
+    const b = await env.DB.prepare(
+      `INSERT INTO channels (channel_username, enabled) VALUES ('bale_b', 1)`
+    ).run();
+    for (const [cid, username, tid] of [
+      [Number(a.meta.last_row_id), 'bale_a', 1],
+      [Number(b.meta.last_row_id), 'bale_b', 2],
+    ]) {
+      await env.DB.prepare(
+        `INSERT INTO messages (source_channel_id, telegram_message_id, message_date, message_text, source_url, summary_text, summarized_at)
+         VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'body', ?3, 'خلاصه خبر.', strftime('%Y-%m-%dT%H:%M:%fZ','now'))`
+      )
+        .bind(cid, tid, `https://t.me/${username}/${tid}`)
+        .run();
+    }
+  }
+
+  it('mirrors the image and every delivered digest to Bale', async () => {
+    await seedTwoChannels();
+    const h = dualHarness();
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      bale: BALE,
+    });
+
+    // No browser binding configured: text-only run, but still mirrored.
+    expect(h.telegramTexts).toHaveLength(2);
+    expect(h.baleTexts).toHaveLength(2);
+    expect(report.published).toBe(2);
+    expect(report.bale).toEqual({ sent: 2, failed: 0 });
+  });
+
+  it('mirrors the image when Browser Run is configured', async () => {
+    await seedTwoChannels();
+    const h = dualHarness();
+    const browser = {
+      quickAction: async () =>
+        new Response(fakePngBytes(), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        }),
+    };
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      browser,
+      bale: BALE,
+    });
+
+    expect(h.telegramPhotos).toHaveLength(1);
+    expect(h.balePhotos).toHaveLength(1);
+    expect(h.baleTexts).toHaveLength(2);
+    expect(report.bale).toEqual({ sent: 3, failed: 0 });
+  });
+
+  it('a Bale failure never blocks Telegram publishing', async () => {
+    await seedTwoChannels();
+    const h = dualHarness(500);
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      bale: BALE,
+    });
+
+    expect(report.published).toBe(2);
+    expect(report.bale).toEqual({ sent: 0, failed: 2 });
+    expect(h.telegramTexts).toHaveLength(2);
+  });
+
+  it('makes no Bale calls when the mirror is not configured', async () => {
+    await seedTwoChannels();
+    const h = dualHarness();
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+    });
+    expect(report.bale).toBeUndefined();
+    const called = (h.fetchMock as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+      String(c[0])
+    );
+    expect(called.every((u) => !u.includes('tapi.bale.ai'))).toBe(true);
+  });
+});
+
+/** Minimal valid PNG header for the Browser Run fake. */
+function fakePngBytes(): ArrayBuffer {
+  const bytes = new Uint8Array(64);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(16, 1920);
+  view.setUint32(20, 1080);
+  return bytes.buffer;
+}

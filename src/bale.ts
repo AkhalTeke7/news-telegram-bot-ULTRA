@@ -1,20 +1,67 @@
-/** Minimal Bale Business Bot API transport. Tokens are never logged. */
+/**
+ * Minimal Bale Business Bot API transport. Tokens are never logged.
+ *
+ * Used by the publisher as a best-effort MIRROR of the Telegram output: the
+ * run image and every text digest are also sent to the Bale destination when
+ * BALE_BOT_TOKEN and BALE_DESTINATION_CHANNEL are configured. A Bale failure
+ * never affects Telegram delivery or publish state.
+ */
+
 const BALE_API = 'https://tapi.bale.ai/business/bot';
 
-export async function baleSendMessage(opts: { token: string; chatId: string; text: string; fetchImpl?: typeof fetch }): Promise<void> {
-  await call('sendMessage', opts.token, { chat_id: opts.chatId, text: opts.text }, opts.fetchImpl);
+/** Bounded so one slow Bale call cannot consume the invocation budget. */
+export const BALE_TIMEOUT_MS = 15_000;
+
+interface BaleCallOptions {
+  token: string;
+  chatId: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
 }
 
-export async function baleSendPhoto(opts: { token: string; chatId: string; photo: ArrayBuffer; caption?: string; fetchImpl?: typeof fetch }): Promise<void> {
+export async function baleSendMessage(
+  opts: BaleCallOptions & { text: string }
+): Promise<void> {
+  await call('sendMessage', opts, { chat_id: opts.chatId, text: opts.text });
+}
+
+export async function baleSendPhoto(
+  opts: BaleCallOptions & { photo: ArrayBuffer; caption?: string }
+): Promise<void> {
   const body = new FormData();
   body.append('chat_id', opts.chatId);
   if (opts.caption) body.append('caption', opts.caption);
+  // A filename is required for the file part; the name is cosmetic.
   body.append('photo', new Blob([opts.photo], { type: 'image/png' }), 'news.png');
-  const response = await (opts.fetchImpl ?? fetch)(`${BALE_API}${encodeURIComponent(opts.token)}/sendPhoto`, { method: 'POST', body });
-  if (!response.ok) throw new Error(`Bale sendPhoto failed with HTTP ${response.status}`);
+
+  const response = await (opts.fetchImpl ?? fetch)(
+    `${BALE_API}${encodeURIComponent(opts.token)}/sendPhoto`,
+    {
+      method: 'POST',
+      body,
+      signal: AbortSignal.timeout(opts.timeoutMs ?? BALE_TIMEOUT_MS),
+    }
+  );
+  if (!response.ok) {
+    throw new Error(`Bale sendPhoto failed with HTTP ${response.status}`);
+  }
 }
 
-async function call(method: string, token: string, payload: Record<string, unknown>, fetchImpl = fetch): Promise<void> {
-  const response = await fetchImpl(`${BALE_API}${encodeURIComponent(token)}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
-  if (!response.ok) throw new Error(`Bale ${method} failed with HTTP ${response.status}`);
+async function call(
+  method: string,
+  opts: BaleCallOptions,
+  payload: Record<string, unknown>
+): Promise<void> {
+  const response = await (opts.fetchImpl ?? fetch)(
+    `${BALE_API}${encodeURIComponent(opts.token)}/${method}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? BALE_TIMEOUT_MS),
+    }
+  );
+  if (!response.ok) {
+    throw new Error(`Bale ${method} failed with HTTP ${response.status}`);
+  }
 }

@@ -36,7 +36,13 @@ export default {
         { id: 3, channelUsername: 'BBC Persian', title: 'گسترش نفوذ حوثی‌ها در آفریقا؛ ایران چه نقشی دارد؟', summary: 'این گزارش به گسترش نفوذ حوثی‌ها در آفریقا و نقش احتمالی ایران می‌پردازد.' },
         { id: 4, channelUsername: 'BBC Persian', title: 'اگر جنگ به فضا کشیده شود؛ ماهواره‌ها چگونه هدف قرار می‌گیرند؟', summary: 'گزارشی درباره آسیب‌پذیری ماهواره‌ها در صورت گسترش درگیری‌ها به فضا.' },
       ];
-      return new Response(buildImageHtml(buildRunFrame(sample, new Date())), { headers: HTML_HEADERS });
+      // Sample ticker lines so the preview also shows the "other headlines" strip.
+      const sampleTicker = [
+        { id: 101, channelUsername: 'BBC Persian', text: 'بازارهای جهانی امروز با رشد شاخص‌ها همراه بودند' },
+        { id: 102, channelUsername: 'Zoomit', text: 'رونمایی از نسل جدید تراشه‌های هوش مصنوعی اعلام شد' },
+        { id: 103, channelUsername: 'IRIB News', text: 'پیش‌بینی کاهش دما در استان‌های شمالی کشور' },
+      ];
+      return new Response(buildImageHtml(buildRunFrame(sample, new Date(), sampleTicker)), { headers: HTML_HEADERS });
     }
 
     if (url.pathname === '/favicon.ico') {
@@ -55,13 +61,16 @@ export default {
   },
 
   /**
-   * Hourly trigger: `wrangler.json triggers.crons = ["30 * * * *"]`.
+   * Bi-hourly trigger: minute 30 of every other UTC hour, configured in
+   * `wrangler.json` under `triggers.crons`.
    *
    * Cloudflare Cron Triggers are UTC-only ("Cron Triggers execute on UTC time")
    * and have no timezone field. Iran is a fixed UTC+03:30 with no daylight
    * saving, so every Iranian hour boundary falls on a UTC `:30` — therefore
-   * minute 30 of every UTC hour is exactly the start of every Iranian hour.
-   * e.g. 20:30 UTC -> 00:00 Tehran, 21:30 UTC -> 01:00 Tehran.
+   * minute 30 of every other UTC hour is exactly the start of every other
+   * Iranian hour. e.g. 20:30 UTC -> 00:00 Tehran, 22:30 UTC -> 02:00 Tehran.
+   * The collector's window is two hours for the same reason (see
+   * DEFAULT_WINDOW_MS), so no hour of news is skipped.
    *
    * Delegates to the same runNewsPipeline() the Telegram manual run uses.
    */

@@ -32,13 +32,13 @@ beforeEach(async () => {
 const CRON = wranglerConfig.triggers.crons;
 
 describe('cron schedule', () => {
-  it('is the single trigger that starts each Iranian hour', () => {
-    expect(CRON).toEqual(['30 * * * *']);
+  it('is the single trigger that starts every other Iranian hour', () => {
+    expect(CRON).toEqual(['30 */2 * * *']);
   });
 
-  it('creates exactly one hourly trigger (no duplicates)', () => {
+  it('creates exactly one bi-hourly trigger (no duplicates)', () => {
     expect(CRON).toHaveLength(1);
-    expect(CRON.filter((c) => /^30 \* \* \* \*$/.test(c))).toHaveLength(1);
+    expect(CRON.filter((c) => /^30 \*\/2 \* \* \*$/.test(c))).toHaveLength(1);
   });
 
   it('uses only UTC cron syntax Cloudflare supports', () => {
@@ -183,7 +183,7 @@ describe('manual processing is independent of the cron schedule', () => {
 
     // The manual path is labelled 'manual' and is not tied to any cron firing.
     expect(outcome.trigger).toBe('manual');
-    expect(CRON).toEqual(['30 * * * *']);
+    expect(CRON).toEqual(['30 */2 * * *']);
     expect(CRON).toHaveLength(1);
 
     // Bookkeeping still records which trigger produced the run.

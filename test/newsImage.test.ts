@@ -6,10 +6,14 @@ import {
   buildRunFrame,
   buildSourceFooter,
   deriveCardTitle,
+  faDigits,
   IMAGE_HEIGHT,
   IMAGE_WIDTH,
   MAX_IMAGE_ITEMS,
+  MAX_TICKER_ITEMS,
+  TICKER_MAX_CHARS,
   renderRunImage,
+  selectTickerNews,
   selectTopNews,
   NewsImageError,
 } from '../src/newsImage';
@@ -244,9 +248,18 @@ describe('news selection', () => {
     const items = [
       row({ id: 1, summaryText: '   ', importance: 5 }),
       row({ id: 2, summaryText: '', importance: 5 }),
-      row({ id: 3, summaryText: 'خبر معتبر.', importance: 1 }),
+      row({ id: 3, summaryText: 'خبر معتبر.', importance: 4 }),
     ];
     expect(selectTopNews(items).map((i) => i.id)).toEqual([3]);
+  });
+
+  it('excludes items the AI scored 1, keeping null-scored legacy rows', () => {
+    const items = [
+      row({ id: 1, summaryText: 'خبر کم‌اهمیت.', importance: 1 }),
+      row({ id: 2, summaryText: 'خبر بدون امتیاز.', importance: null }),
+      row({ id: 3, summaryText: 'خبر مهم.', importance: 3 }),
+    ];
+    expect(selectTopNews(items).map((i) => i.id)).toEqual([3, 2]);
   });
 
   it('is deterministic for equal importance and equal dates', () => {
@@ -565,7 +578,8 @@ describe('runPublishing image integration', () => {
     await env.DB.prepare(`UPDATE messages SET importance = 5 WHERE source_channel_id = ?1`)
       .bind(b)
       .run();
-    await env.DB.prepare(`UPDATE messages SET importance = 1 WHERE source_channel_id = ?1`)
+    // Score 2, not 1: a score of 1 would exclude the row from the image entirely.
+    await env.DB.prepare(`UPDATE messages SET importance = 2 WHERE source_channel_id = ?1`)
       .bind(a)
       .run();
 
@@ -583,5 +597,125 @@ describe('runPublishing image integration', () => {
     expect(report.image?.channels).toBe(2);
     // the higher-scored (longer) item must come first
     expect(html.indexOf('خلاصه‌ای بسیار مفصل‌تر')).toBeLessThan(html.indexOf('کوتاه.'));
+  });
+});
+describe('ticker selection', () => {
+  it('lists every remaining headline in the same order as the cards', () => {
+    const items = [
+      row({ id: 1, summaryText: 'خبر یک.', importance: 5 }),
+      row({ id: 2, summaryText: 'خبر دو.', importance: 4 }),
+      row({ id: 3, summaryText: 'خبر سه.', importance: 3 }),
+      row({ id: 4, summaryText: 'خبر چهار.', importance: 2 }),
+      row({ id: 5, summaryText: 'خبر پنج.', importance: 2 }),
+      row({ id: 6, summaryText: 'خبر شش.', importance: 1 }),
+    ];
+    const top = selectTopNews(items);
+    expect(top.map((t) => t.id)).toEqual([1, 2, 3, 4]);
+
+    const ticker = selectTickerNews(items, new Set(top.map((t) => t.id)));
+    // id 6 scored importance 1 and is excluded; only id 5 remains.
+    expect(ticker.items.map((t) => t.id)).toEqual([5]);
+    expect(ticker.hidden).toBe(0);
+  });
+
+  it('keeps each line brief and single-line sized', () => {
+    const long = 'این یک خبر بسیار طولانی است که باید در نوار عناوین کوتاه شود و ادامهٔ آن قطع می‌شود.'
+      .repeat(3);
+    const [item] = selectTickerNews([row({ id: 1, summaryText: long, importance: 5 })], new Set()).items;
+    expect(item.text.length).toBeLessThanOrEqual(TICKER_MAX_CHARS);
+    expect(item.text.endsWith('…')).toBe(true);
+  });
+
+  it('caps the ticker and reports the hidden remainder', () => {
+    const items = Array.from(
+      { length: MAX_TICKER_ITEMS + 5 },
+      (_, i) => row({ id: i + 1, summaryText: `خبر ${i + 1}.`, importance: 5 })
+    );
+    const ticker = selectTickerNews(items, new Set());
+    expect(ticker.items).toHaveLength(MAX_TICKER_ITEMS);
+    expect(ticker.hidden).toBe(5);
+  });
+
+  it('is empty when everything is already a card or scored 1', () => {
+    const items = [
+      row({ id: 1, summaryText: 'خبر کارت.', importance: 5 }),
+      row({ id: 2, summaryText: 'خبر کم‌اهمیت.', importance: 1 }),
+    ];
+    const top = selectTopNews(items);
+    const ticker = selectTickerNews(items, new Set(top.map((t) => t.id)));
+    expect(ticker.items).toEqual([]);
+    expect(ticker.hidden).toBe(0);
+  });
+
+  it('converts digits to Persian for the overflow line', () => {
+    expect(faDigits(12)).toBe('۱۲');
+    expect(faDigits(0)).toBe('۰');
+  });
+});
+
+describe('ticker html', () => {
+  const cards = [
+    { id: 1, channelUsername: 'news_a', title: 'تیتر یک', summary: 'خلاصه یک' },
+    { id: 2, channelUsername: 'news_b', title: 'تیتر دو', summary: 'خلاصه دو' },
+  ];
+  const ticker = [
+    { id: 11, channelUsername: 'news_c', text: 'عنوان کوتاه از کانال سوم' },
+    { id: 12, channelUsername: 'news_d', text: 'عنوان کوتاه از کانال چهارم' },
+  ];
+
+  it('renders the ticker strip with one single-line entry per item', () => {
+    const html = buildImageHtml(buildRunFrame(cards, new Date(NOW), ticker));
+    expect(html).toContain('class="ticker"');
+    expect(html).toContain('سایر عناوین');
+    expect(html).toContain('white-space:nowrap');
+    expect(html).toContain('>عنوان کوتاه از کانال سوم<');
+    expect(html).toContain('>عنوان کوتاه از کانال چهارم<');
+  });
+
+  it('omits the strip entirely when there are no extra headlines', () => {
+    const html = buildImageHtml(buildRunFrame(cards, new Date(NOW)));
+    expect(html).not.toContain('class="ticker"');
+    expect(html).not.toContain('سایر عناوین');
+  });
+
+  it('marks the overflow line and keeps the card count at the top four', () => {
+    const html = buildImageHtml(
+      buildRunFrame(cards, new Date(NOW), [
+        ...ticker,
+        { id: 0, channelUsername: '', text: `و ${faDigits(3)} خبر دیگر`, more: true },
+      ])
+    );
+    expect(html).toContain('class="ti more"');
+    expect(html).toContain('و ۳ خبر دیگر');
+    expect(html.split('<article class="card"').length - 1).toBe(2);
+  });
+
+  it('credits ticker channels in the footer too', () => {
+    const frame = buildRunFrame(cards, new Date(NOW), ticker);
+    expect(frame.footer).toContain('@news_c');
+    expect(frame.footer).toContain('@news_d');
+    expect(frame.footer).toContain('منابع:');
+  });
+
+  it('renderRunImage feeds the ticker and reports its size', async () => {
+    const items = [
+      row({ id: 1, summaryText: 'خبر یک.', importance: 6 }),
+      row({ id: 2, summaryText: 'خبر دو.', importance: 5 }),
+      row({ id: 3, summaryText: 'خبر سه.', importance: 4 }),
+      row({ id: 4, summaryText: 'خبر چهار.', importance: 3 }),
+      row({ id: 5, summaryText: 'خبر پنجم برای نوار عناوین.', importance: 2 }),
+    ];
+    const browser = {
+      quickAction: vi.fn(async (_a: string, _payload: Record<string, unknown>) =>
+        new Response(fakePng(), { status: 200, headers: { 'content-type': 'image/png' } })
+      ),
+    };
+    const rendered = await renderRunImage({ browser, items, now: new Date(NOW) });
+    expect(rendered).not.toBeNull();
+    expect(rendered!.items).toHaveLength(4);
+    expect(rendered!.tickerCount).toBe(1);
+    const html = String((browser.quickAction as ReturnType<typeof vi.fn>).mock.calls[0][1].html);
+    expect(html).toContain('class="ticker"');
+    expect(html).toContain('خبر پنجم برای نوار عناوین.');
   });
 });

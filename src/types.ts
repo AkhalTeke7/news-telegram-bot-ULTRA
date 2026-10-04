@@ -12,7 +12,16 @@ export interface Env {
   BALE_DESTINATION_CHANNEL?: string;
   /** Single-owner admin password. Never exposed to the frontend. */
   ADMIN_PASSWORD: string;
-  /** OpenCode Zen key. Wrangler secret only; never logged or persisted. */
+  /**
+   * OpenRouter API key (https://openrouter.ai). Preferred secret name for the
+   * chat-completions provider. Wrangler secret only; never logged or persisted.
+   */
+  OPENROUTER_API_KEY?: string;
+  /**
+   * Legacy secret name from the OpenCode/Zen era. Still read as an alias for
+   * OPENROUTER_API_KEY so existing deployments that stored an OpenRouter key
+   * under this name keep working with no re-configuration.
+   */
   OPENCODE_API_KEY?: string;
   /**
    * Destination chat for Phase 4 publishing: "@channel_username" or a numeric

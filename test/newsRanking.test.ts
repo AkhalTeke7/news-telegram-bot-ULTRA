@@ -6,7 +6,7 @@ import {
   runImportanceRanking,
   selectRankCandidates,
 } from '../src/newsRanking';
-import { parseNewsJson, parseRanking, rankNewsItems, summarizeNews } from '../src/opencode';
+import { parseNewsJson, parseRanking, rankNewsItems, summarizeNews } from '../src/openrouter';
 import {
   markRejectedByAi,
   MAX_TITLE_CHARS,
@@ -57,7 +57,7 @@ async function seedProcessed(
   return Number(r.meta.last_row_id);
 }
 
-/** Canned OpenCode chat-completions reply. */
+/** Canned OpenRouter chat-completions reply. */
 function aiFetch(content: string) {
   const calls: { body: any }[] = [];
   const fetchImpl = vi.fn(async (_url: unknown, init: RequestInit) => {
@@ -294,9 +294,11 @@ describe('global ranking', () => {
     }
     const betaId = await seedProcessed(b, 'channel_beta', 1, 'تیتر ب', 'خلاصهٔ ب.', 5);
 
-    // candidate order is chronological ascending: the six alpha rows then beta
+    // candidate order is chronological ascending: the six alpha rows then beta.
+    // Filler rows score 2, not 1: an explicit 1 means "not worth the image" and
+    // is excluded from selection entirely (see README / selectTopNews).
     const scores = JSON.stringify(
-      Array.from({ length: 7 }, (_, i) => ({ i, importance: i === 6 ? 5 : i === 0 ? 4 : 1 }))
+      Array.from({ length: 7 }, (_, i) => ({ i, importance: i === 6 ? 5 : i === 0 ? 4 : 2 }))
     );
     const ai = aiFetch(scores);
     await runImportanceRanking(env.DB, { apiKey: 'K', fetchImpl: ai.fetchImpl, now: NOW });
@@ -310,7 +312,7 @@ describe('global ranking', () => {
     // globally highest score wins, regardless of channel and volume
     expect(top[0].id).toBe(betaId);
     expect(top[1].id).toBe(alphaIds[0]);
-    // the remaining two slots are filled from the five rows tied at importance 1,
+    // the remaining two slots are filled from the five rows tied at importance 2,
     // so at least some alpha rows must be left out of the image
     expect(top.filter((t) => alphaIds.includes(t.id))).toHaveLength(3);
     expect(alphaIds.some((id) => !top.some((t) => t.id === id))).toBe(true);

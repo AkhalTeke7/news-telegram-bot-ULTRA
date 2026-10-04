@@ -12,8 +12,8 @@
  */
 
 import { resolveFreeModel, recordModelFailure } from './modelManager';
-import { rankNewsItems, AiError, type FetchOptions } from './opencode';
-import type { RankCandidate, RankedItem } from './opencode';
+import { rankNewsItems, AiError, type FetchOptions } from './openrouter';
+import type { RankCandidate, RankedItem } from './openrouter';
 
 export interface RankCandidateRow extends RankCandidate {
   channelId: number;

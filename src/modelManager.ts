@@ -1,5 +1,5 @@
 /**
- * Selects which FREE OpenCode model to use, caches the live list in D1 for 24h,
+ * Selects which FREE OpenRouter model to use, caches the live list in D1 for 24h,
  * and rotates to a different free model when the current one fails.
  *
  * Invariants:
@@ -8,7 +8,7 @@
  *  - when no free model is available, the caller gets `null` (never a paid model)
  */
 
-import { discoverFreeModels, MODEL_REFRESH_INTERVAL_MS, type ModelDiscovery } from './opencode';
+import { discoverFreeModels, MODEL_REFRESH_INTERVAL_MS, type ModelDiscovery } from './openrouter';
 import { getSetting, setSetting } from './settings';
 
 export const KEY_SELECTED_MODEL = 'selected_model';
