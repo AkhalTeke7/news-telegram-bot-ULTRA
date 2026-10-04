@@ -8,6 +8,7 @@ import {
   deriveCardTitle,
   IMAGE_HEIGHT,
   IMAGE_WIDTH,
+  MAX_IMAGE_ITEMS,
   renderRunImage,
   selectTopNews,
   NewsImageError,
@@ -263,6 +264,32 @@ describe('news selection', () => {
     expect(item.summary).toBe(summary);
     expect(summary.startsWith(item.title)).toBe(true);
     expect(item.title.length).toBeGreaterThan(0);
+  });
+
+  it('returns at most four items even when many are available', () => {
+    const items = Array.from({ length: 9 }, (_, i) =>
+      row({ id: i + 1, summaryText: `خلاصهٔ خبر ${i + 1}.`, importance: 5 - i })
+    );
+    const top = selectTopNews(items);
+    expect(top).toHaveLength(4);
+    expect(top.map((t) => t.id)).toEqual([1, 2, 3, 4]);
+    expect(MAX_IMAGE_ITEMS).toBe(4);
+  });
+
+  it('the template itself never renders more than four cards', () => {
+    const html = buildImageHtml(
+      buildRunFrame(
+        Array.from({ length: 7 }, (_, i) => ({
+          id: i + 1,
+          channelUsername: 'chan_x',
+          title: `تیتر ${i + 1}`,
+          summary: `خلاصه ${i + 1}.`,
+        })),
+        new Date(NOW)
+      )
+    );
+    expect(html.split('<article class="card"').length - 1).toBe(4);
+    expect(html).toContain('class="grid four"');
   });
 
   it('returns nothing when there is no news', () => {

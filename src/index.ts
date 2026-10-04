@@ -44,7 +44,14 @@ export default {
   },
 
   /**
-   * Hourly trigger (wrangler.json triggers.crons = ["0 * * * *"]).
+   * Hourly trigger: `wrangler.json triggers.crons = ["30 * * * *"]`.
+   *
+   * Cloudflare Cron Triggers are UTC-only ("Cron Triggers execute on UTC time")
+   * and have no timezone field. Iran is a fixed UTC+03:30 with no daylight
+   * saving, so every Iranian hour boundary falls on a UTC `:30` — therefore
+   * minute 30 of every UTC hour is exactly the start of every Iranian hour.
+   * e.g. 20:30 UTC -> 00:00 Tehran, 21:30 UTC -> 01:00 Tehran.
+   *
    * Delegates to the same runNewsPipeline() the Telegram manual run uses.
    */
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
