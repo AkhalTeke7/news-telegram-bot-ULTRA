@@ -22,8 +22,10 @@
     article { min-height: 340px; padding: 34px 44px; border-radius: 30px; border: 2px solid #ffffffdd; background: #ffffffb8; box-shadow: 0 18px 42px #3f5efb22, inset 0 1px 0 #ffffffe8; position: relative; }
     article::after { content: ""; position: absolute; right: 0; top: 25%; height: 50%; width: 6px; border-radius: 4px; background: var(--accent); }
     .source { color: #3f5efb; font-size: 24px; direction: ltr; text-align: right; }
-    h2 { font-size: 42px; line-height: 1.35; margin: 20px 0 12px; }
-    p { color: #596274; font-size: 28px; line-height: 1.55; margin: 0; }
+    .importance { display:inline-block; margin-top:18px; color:#8e54bf; font-size:20px; }
+    mark { background:#fc466b33; color:#8e54bf; border-radius:8px; padding:0 6px; }
+    h2 { font-size: 37px; line-height: 1.35; margin: 20px 0 12px; }
+    p { color: #596274; font-size: 25px; line-height: 1.55; margin: 0; }
     footer { margin-top: 36px; color: #596274; font-size: 28px; }
   </style>
 </head>
@@ -41,31 +43,27 @@
   <footer id="sources"></footer>
 
   <script>
+    // Live sample headlines fetched from BBC Persian RSS on 2026-10-04.
     const news = [
-      {
-        channel: "news_one",
-        title: "وزیر اقتصاد از بسته جدید حمایت از تولید خبر داد",
-        summary: "این بسته با هدف کاهش هزینه‌های تولید و تسهیل دسترسی بنگاه‌ها به منابع مالی اجرا می‌شود.",
-        accent: "#3f5efb"
-      },
-      {
-        channel: "news_two",
-        title: "افتتاح مسیر جدید حمل‌ونقل در شمال کشور",
-        summary: "با بهره‌برداری از این مسیر، زمان جابه‌جایی کالا میان چند شهر کاهش خواهد یافت.",
-        accent: "#8e54bf"
-      }
+      { channel: "BBC Persian", title: "اعلام عملیات دولت یمن برای پس گرفتن قلمرو در پی پیشروی حوثی‌ها", summary: "گزارش تازه درباره عملیات دولت یمن و تغییرات میدانی منطقه.", accent: "#fc466b", importance: 5 },
+      { channel: "BBC Persian", title: "استرالیا در حال بررسی ارتباط کمک‌خلبان هواپیمای فلای‌دبی با آن کشور است", summary: "مقام‌های استرالیا در حال بررسی اطلاعات مرتبط با کمک‌خلبان این هواپیما هستند.", accent: "#8e54bf", importance: 4 },
+      { channel: "BBC Persian", title: "گسترش نفوذ حوثی‌ها در آفریقا؛ ایران چه نقشی دارد؟", summary: "این گزارش به گسترش نفوذ حوثی‌ها در آفریقا و نقش احتمالی ایران می‌پردازد.", accent: "#6f72d8", importance: 3 },
+      { channel: "BBC Persian", title: "اگر جنگ به فضا کشیده شود؛ ماهواره‌ها چگونه هدف قرار می‌گیرند؟", summary: "گزارشی درباره آسیب‌پذیری ماهواره‌ها در صورت گسترش درگیری‌ها به فضا.", accent: "#3f5efb", importance: 2 }
     ];
 
     // This is the only image input: Browser Run screenshots the resulting DOM.
     document.querySelector("#date").textContent = "۱۴۰۵/۰۷/۱۲ · ۱۵:۳۰";
     document.querySelector("#stories").innerHTML = news.map(item => `
       <article style="--accent:${item.accent}">
-        <div class="source">@${escapeHtml(item.channel)}</div>
-        <h2>${escapeHtml(item.title)}</h2>
+        <div class="source">${escapeHtml(item.channel)}</div>
+        <div class="importance">اهمیت ${item.importance} از ۵</div>
+        <h2>${highlight(item.title)}</h2>
         <p>${escapeHtml(item.summary)}</p>
       </article>
     `).join("");
     document.querySelector("#sources").textContent = "منابع: " + news.map(item => "@" + item.channel).join(" · ");
+
+    function highlight(value) { return escapeHtml(value).replace(/(یمن|حوثی‌ها|ایران|ماهواره‌ها)/g, "<mark>$1</mark>"); }
 
     function escapeHtml(value) {
       return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;")
