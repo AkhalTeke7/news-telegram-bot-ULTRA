@@ -56,6 +56,8 @@ export interface ImageFrame {
   time: string;
   /** Pre-formatted source line, e.g. `منبع: @a` or `منابع: @a · @b`. */
   footer: string;
+  /** Brand signature displayed in the footer. */
+  signature?: string;
   items: ImageNewsItem[];
 }
 
@@ -255,7 +257,8 @@ export function buildImageHtml(frame: ImageFrame): string {
     text-align:right;letter-spacing:.5px}
   .card h2{position:relative;font-size:40px;font-weight:800;line-height:1.32;color:#202838}
   .card p{position:relative;font-size:27px;font-weight:400;line-height:1.45;color:#596274;opacity:.93}
-  .foot{padding:22px 28px 34px;font-size:28px;font-weight:600;color:#596274;text-align:right}
+  .foot{display:flex;justify-content:space-between;align-items:center;padding:22px 28px 34px;font-size:28px;font-weight:600;color:#596274;text-align:right}
+  .sig{font-family:system-ui,sans-serif;font-size:30px;font-weight:700;letter-spacing:1px;color:#8e54bf;direction:ltr}
 </style>
 </head>
 <body>
@@ -274,7 +277,7 @@ export function buildImageHtml(frame: ImageFrame): string {
     <section class="grid ${grid}">
         ${cards}
     </section>
-    <div class="foot">${esc(frame.footer)}</div>
+    <div class="foot"><span>${esc(frame.footer)}</span><span class="sig">${esc(frame.signature ?? 'Akhal-Teke')}</span></div>
   </div>
 </body>
 </html>`;
