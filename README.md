@@ -27,6 +27,28 @@ Each stage is isolated: one failing channel, message, or model never stops the r
 Failures are retried on the next run (every two hours) because a message is only marked
 complete after its work is persisted.
 
+### Collection-only mode
+
+The admin panel has a «فقط جمع‌آوری اخبار» switch. When it is on, the pipeline
+shrinks to just the `collect` stage: the bot fetches and stores raw news but
+never filters, summarizes, ranks or publishes anything — nothing is sent to the
+destination channel. Raw messages stay in D1, so switching the mode back off lets
+the normal pipeline pick everything up on the next run. The setting is persisted
+in `ai_settings` (key `collection_only_mode`), not in code or secrets.
+
+The panel also has manual test buttons wired to authenticated endpoints:
+
+| Button | Endpoint | Effect |
+| --- | --- | --- |
+| 📥 جمع‌آوری فوری اخبار | `POST /api/pipeline/run` `{mode:"collect"}` | One forced collection-only run (this run only) |
+| ⚙️ اجرای کامل پردازش | `POST /api/pipeline/run` `{mode:"process"}` | One forced full pipeline run, even in collection-only mode |
+| 🧪 ارسال پیام آزمایشی | `POST /api/telegram/test-message` | Test message to the destination channel |
+| 🖼 ارسال تصویر آزمایشی | `POST /api/telegram/test-image` | Test news image to the destination channel |
+
+Calling `POST /api/pipeline/run` without a `mode` follows the stored setting.
+The mode itself is read via `GET /api/settings` and changed via
+`POST /api/settings` `{"collectionOnly": true|false}`.
+
 ## Requirements
 
 - Node.js 20+
@@ -387,8 +409,10 @@ curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
 
 The Worker exposes the admin panel at `/` (Persian RTL), `GET /healthz`, the exact
 renderer preview at `GET /preview/news-image`, the Telegram webhook at
-`POST /api/telegram/webhook`, and an authenticated `GET /api/status`
-diagnostics endpoint. Everything else under `/api` requires the admin session cookie.
+`POST /api/telegram/webhook`, an authenticated `GET /api/status`
+diagnostics endpoint, the processing-mode endpoints (`GET`/`POST /api/settings`)
+and `POST /api/pipeline/run` for manual runs. Everything else under `/api`
+requires the admin session cookie.
 
 ## Troubleshooting
 

@@ -167,6 +167,15 @@ describe('diagnostics report', () => {
     expect(report.ai.freeModelsCached).toBe(0);
     expect(report.cron.lastRun).toBeNull();
   });
+
+  it('reports collection-only processing mode from the stored setting', async () => {
+    const before = await getStatusReport(env.DB, { destinationConfigured: false, now: NOW });
+    expect(before.processing.collectionOnly).toBe(false);
+
+    await setSetting(env.DB, 'collection_only_mode', '1');
+    const after = await getStatusReport(env.DB, { destinationConfigured: false, now: NOW });
+    expect(after.processing.collectionOnly).toBe(true);
+  });
 });
 
 describe('cron run status semantics', () => {

@@ -412,8 +412,148 @@ describe('channels API', () => {
   });
 });
 
+describe('processing settings API', () => {
+  let s: Session;
+
+  beforeEach(async () => {
+    await resetDb();
+    await env.DB.prepare(`DELETE FROM ai_settings`).run();
+    s = await login();
+  });
+
+  it('requires auth for settings read and write', async () => {
+    expect((await call('/api/settings')).status).toBe(401);
+    expect((await call('/api/settings', { method: 'POST', body: '{}' })).status).toBe(401);
+  });
+
+  it('defaults to full processing', async () => {
+    const res = await call('/api/settings', { session: s });
+    expect(res.status).toBe(200);
+    expect((await res.json<{ collectionOnly: boolean }>()).collectionOnly).toBe(false);
+  });
+
+  it('persists collection-only mode', async () => {
+    const set = await call('/api/settings', {
+      method: 'POST',
+      session: s,
+      body: JSON.stringify({ collectionOnly: true }),
+    });
+    expect(set.status).toBe(200);
+    expect((await set.json<{ collectionOnly: boolean }>()).collectionOnly).toBe(true);
+
+    const get = await call('/api/settings', { session: s });
+    expect((await get.json<{ collectionOnly: boolean }>()).collectionOnly).toBe(true);
+
+    const row = await env.DB.prepare(
+      `SELECT value FROM ai_settings WHERE key = 'collection_only_mode'`
+    ).first<{ value: string }>();
+    expect(row?.value).toBe('1');
+  });
+
+  it('rejects a non-boolean collectionOnly', async () => {
+    for (const value of ['true', 1, null, { on: true }]) {
+      const res = await call('/api/settings', {
+        method: 'POST',
+        session: s,
+        body: JSON.stringify({ collectionOnly: value }),
+      });
+      expect(res.status, `value: ${JSON.stringify(value)}`).toBe(400);
+    }
+  });
+
+  it('rejects a non-JSON body (CSRF hardening)', async () => {
+    const res = await call('/api/settings', {
+      method: 'POST',
+      session: s,
+      headers: { 'content-type': 'text/plain', cookie: s.cookie },
+      body: 'collectionOnly=true',
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('manual pipeline run API', () => {
+  let s: Session;
+
+  beforeEach(async () => {
+    await resetDb();
+    await env.DB.prepare(`DELETE FROM ai_settings`).run();
+    s = await login();
+  });
+
+  it('requires auth', async () => {
+    const res = await call('/api/pipeline/run', { method: 'POST', body: '{}' });
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects an invalid mode', async () => {
+    for (const mode of ['everything', '', 1, true, null]) {
+      const res = await call('/api/pipeline/run', {
+        method: 'POST',
+        session: s,
+        body: JSON.stringify({ mode }),
+      });
+      expect(res.status, `mode: ${JSON.stringify(mode)}`).toBe(400);
+    }
+  });
+
+  it('runs a forced collection-only run and skips processing stages', async () => {
+    const res = await call('/api/pipeline/run', {
+      method: 'POST',
+      session: s,
+      body: JSON.stringify({ mode: 'collect' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json<Record<string, any>>();
+    expect(body.collectionOnly).toBe(true);
+    expect(body.summarization).toBeNull();
+    expect(body.ranking).toBeNull();
+    expect(body.publishing).toBeNull();
+    expect(body.collection).not.toBeNull();
+  });
+
+  it('forces the full pipeline on demand even in collection-only mode', async () => {
+    await call('/api/settings', {
+      method: 'POST',
+      session: s,
+      body: JSON.stringify({ collectionOnly: true }),
+    });
+    const res = await call('/api/pipeline/run', {
+      method: 'POST',
+      session: s,
+      body: JSON.stringify({ mode: 'process' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json<Record<string, any>>();
+    expect(body.collectionOnly).toBe(false);
+    // With no API key in tests the summarize/rank stages record safe errors,
+    // but the publish stage always runs and reports its counts.
+    expect(body.publishing).not.toBeNull();
+  });
+
+  it('follows the stored setting when no mode is given', async () => {
+    await call('/api/settings', {
+      method: 'POST',
+      session: s,
+      body: JSON.stringify({ collectionOnly: true }),
+    });
+    const res = await call('/api/pipeline/run', {
+      method: 'POST',
+      session: s,
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json<Record<string, any>>();
+    expect(body.collectionOnly).toBe(true);
+    expect(body.publishing).toBeNull();
+  });
+});
+
 describe('cron', () => {
-  beforeEach(resetDb);
+  beforeEach(async () => {
+    await resetDb();
+    await env.DB.prepare(`DELETE FROM ai_settings`).run();
+  });
 
   it('records an hourly execution and stores no messages', async () => {
     const before = await env.DB.prepare(`SELECT COUNT(*) AS n FROM cron_runs`).first<{ n: number }>();
@@ -435,6 +575,27 @@ describe('cron', () => {
     ).first<{ trigger_name: string }>();
     expect(row?.trigger_name).toBe('0 * * * *');
   });
+
+  it('collection-only mode records a successful collect-only run with no processing', async () => {
+    const { setSetting } = await import('../src/settings');
+    await setSetting(env.DB, 'collection_only_mode', '1');
+
+    const ctx = createExecutionContext();
+    await worker.scheduled!(
+      createScheduledController({ cron: '30 */2 * * *', scheduledTime: Date.now() }),
+      env,
+      ctx
+    );
+    await waitOnExecutionContext(ctx);
+
+    const row = await env.DB.prepare(
+      `SELECT status, messages_summarized, messages_published FROM cron_runs ORDER BY id DESC LIMIT 1`
+    ).first<{ status: string; messages_summarized: number; messages_published: number }>();
+    // One stage (collect) completed cleanly, and deliberately no summarize/publish.
+    expect(row?.status).toBe('success');
+    expect(row?.messages_summarized).toBe(0);
+    expect(row?.messages_published).toBe(0);
+  });
 });
 
 describe('static UI', () => {
@@ -451,6 +612,12 @@ describe('static UI', () => {
     expect(html).toContain('غیرفعال');
     expect(html).toContain('حذف');
     expect(html).toContain('آخرین بررسی');
+    expect(html).toContain('ابزارها و آزمون');
+    expect(html).toContain('فقط جمع‌آوری');
+    expect(html).toContain('جمع‌آوری فوری اخبار');
+    expect(html).toContain('اجرای کامل پردازش');
+    expect(html).toContain('پیام آزمایشی');
+    expect(html).toContain('تصویر آزمایشی');
     expect(html).not.toContain(PASSWORD);
     expect(html).not.toContain('TELEGRAM_BOT_TOKEN');
   });

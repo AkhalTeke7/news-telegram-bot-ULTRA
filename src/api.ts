@@ -12,6 +12,8 @@ import {
   listChannels,
   setChannelEnabled,
 } from './channels';
+import { runNewsPipeline } from './pipeline';
+import { isCollectionOnly, setCollectionOnly } from './processingMode';
 import { resolveDestination } from './publisher';
 import { addSourceChannel } from './sourceChannels';
 import { getChannelStats, getStatusReport } from './status';
@@ -127,6 +129,63 @@ export function createApi(): Hono<Bindings> {
       destinationConfigured: resolveDestination(c.env) !== null,
     });
     return c.json(report);
+  });
+
+  // Processing mode: "collection only" means the hourly run just fetches and
+  // stores raw news — no ad filter, no summarization, no ranking, no publish.
+  // Persisted in ai_settings, so it survives deploys. Never a secret.
+  app.get('/api/settings', async (c) => {
+    return c.json({ collectionOnly: await isCollectionOnly(c.env.DB) });
+  });
+
+  app.post('/api/settings', async (c) => {
+    const body = await readJson(c);
+    if (!body) return fail(c, 400, 'بدنه درخواست باید JSON معتبر و کوچک باشد.');
+    if (typeof body.collectionOnly !== 'boolean') {
+      return fail(c, 400, 'فیلد collectionOnly باید مقدار true یا false داشته باشد.');
+    }
+    await setCollectionOnly(c.env.DB, body.collectionOnly);
+    return c.json({ collectionOnly: body.collectionOnly });
+  });
+
+  /**
+   * Manual pipeline run from the admin panel. Runs inline and returns the
+   * outcome summary (counts and safe categories only). body.mode:
+   *  - 'collect' → force a collection-only run (raw news, no processing)
+   *  - 'process' → force the full collect → filter → summarize → rank → publish
+   *  - omitted   → follow the stored collection-only setting
+   * The override affects this run only; the stored setting is never changed.
+   */
+  app.post('/api/pipeline/run', async (c) => {
+    const body = await readJson(c);
+    if (!body) return fail(c, 400, 'بدنه درخواست باید JSON معتبر و کوچک باشد.');
+
+    let modeOverride: 'collect' | 'process' | undefined;
+    if (body.mode !== undefined) {
+      if (body.mode !== 'collect' && body.mode !== 'process') {
+        return fail(c, 400, 'مقدار mode باید «collect» یا «process» باشد.');
+      }
+      modeOverride = body.mode;
+    }
+
+    const outcome = await runNewsPipeline(c.env.DB, c.env, {
+      trigger: 'manual-ui',
+      modeOverride,
+    });
+    return c.json({
+      ok: outcome.status !== 'failed',
+      status: outcome.status,
+      collectionOnly: outcome.collectionOnly,
+      ranAt: outcome.ranAt,
+      durationMs: outcome.durationMs,
+      collection: outcome.collection,
+      filteredAdvertisements: outcome.filteredAdvertisements,
+      summarization: outcome.summarization,
+      ranking: outcome.ranking,
+      publishing: outcome.publishing,
+      itemFailures: outcome.itemFailures,
+      errors: outcome.errors,
+    });
   });
 
   app.post('/api/channels', async (c) => {

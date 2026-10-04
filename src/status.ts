@@ -6,6 +6,7 @@
  */
 
 import { getCronSummary, getLastCronRun, type CronRunRow } from './cronRuns';
+import { COLLECTION_ONLY_SETTING } from './processingMode';
 import { getSetting } from './settings';
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -53,6 +54,10 @@ export interface StatusReport {
   };
   publishing: {
     destinationConfigured: boolean;
+  };
+  processing: {
+    /** True = the hourly run only collects raw news; nothing is summarized or published. */
+    collectionOnly: boolean;
   };
   recentErrors: { category: string; count: number; latestAt: string | null }[];
 }
@@ -137,6 +142,7 @@ export async function getStatusReport(
       getSetting(db, 'free_models'),
       getSetting(db, 'free_models_refreshed_at'),
       getSetting(db, 'last_model_failure'),
+      getSetting(db, COLLECTION_ONLY_SETTING),
     ]),
   ]);
 
@@ -186,6 +192,7 @@ export async function getStatusReport(
       lastModelFailure: ai[3],
     },
     publishing: { destinationConfigured: opts.destinationConfigured },
+    processing: { collectionOnly: ai[4] === '1' },
     recentErrors: (errorRows ?? []).map((r) => ({
       category: r.category,
       count: Number(r.count),

@@ -3,16 +3,25 @@
 export type CronStatus = 'success' | 'partial' | 'failed';
 
 /** collect → filter → summarize → rank → publish */
-const EXPECTED_STAGES = 5;
+export const EXPECTED_STAGES = 5;
 
 /**
  * A run is only "success" when every stage completed *and* no individual item
  * failed. Item-level failures (one bad channel, one bad message) are reported as
  * "partial" so the admin panel never shows a green run that actually skipped work.
+ *
+ * `expectedStages` is pipeline-supplied: a collection-only run has exactly one
+ * stage (collect), so it can still record a clean "success" without faking the
+ * four processing stages it deliberately skipped.
  */
-export function deriveCronStatus(stagesRun: number, stageErrors: number, itemFailures: number): CronStatus {
+export function deriveCronStatus(
+  stagesRun: number,
+  stageErrors: number,
+  itemFailures: number,
+  expectedStages: number = EXPECTED_STAGES
+): CronStatus {
   if (stagesRun === 0) return 'failed';
-  if (stageErrors > 0 || stagesRun < EXPECTED_STAGES || itemFailures > 0) return 'partial';
+  if (stageErrors > 0 || stagesRun < expectedStages || itemFailures > 0) return 'partial';
   return 'success';
 }
 
