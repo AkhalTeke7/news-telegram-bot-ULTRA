@@ -205,7 +205,10 @@ function esc(value: string): string {
  * 4 items as 2x2. Text is laid out by the browser, so Persian shaping is native.
  */
 export function buildImageHtml(frame: ImageFrame): string {
-  const cards = frame.items
+  // The four-card maximum is enforced here as well as in selectTopNews(), so the
+  // template can never lay out a fifth card outside the 2x2 grid.
+  const items = frame.items.slice(0, MAX_IMAGE_ITEMS);
+  const cards = items
     .map(
       (item, i) => `<article class="card" style="--accent:${
         ['#3f5efb', '#8e54bf', '#fc466b', '#43b89c'][i % 4]
@@ -217,7 +220,7 @@ export function buildImageHtml(frame: ImageFrame): string {
     )
     .join('\n        ');
 
-  const grid = ['one', 'two', 'three', 'four'][Math.max(0, Math.min(3, frame.items.length - 1))];
+  const grid = ['one', 'two', 'three', 'four'][Math.max(0, Math.min(3, items.length - 1))];
 
   return `<!DOCTYPE html>
 <html lang="fa" dir="rtl">

@@ -163,7 +163,9 @@ describe('summarizer input hygiene', () => {
       'خبر بلند دربارهٔ بستهٔ حمایتی، بودجه و واکنش بازار با جزئیات زیاد و اعداد متعدد و تاریخ‌های مشخص و علت و نتیجه.'
     );
 
-    expect(userContent).toContain('خلاصهٔ خبریِ فارسی این متن را بنویس.');
+    // The per-message contract now asks for a Persian title + summary as JSON
+    // (migration from the old "write a Persian summary" wording).
+    expect(userContent).toContain('این متن را طبق قرارداد JSON به عنوان و خلاصهٔ فارسی تبدیل کن.');
     expect(userContent).not.toMatch(/۱ تا ۴ جمله|یک جملهٔ کوتاه بنویس/);
   });
 });

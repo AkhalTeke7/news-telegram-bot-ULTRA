@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { env } from 'cloudflare:test';
+import { beforeEach, describe, expect, it } from 'vitest';
 import wranglerConfig from '../wrangler.json';
+import { runNewsPipeline } from '../src/pipeline';
 import {
   formatTehranDateTime,
   formatTehranDateTimeOrDash,
@@ -8,6 +10,18 @@ import {
   tehranParts,
   timeZoneOffsetMinutes,
 } from '../src/time';
+import type { Env } from '../src/types';
+
+function testEnv(): Env {
+  return { DB: env.DB, ADMIN_PASSWORD: 'tz-test-password' } as Env;
+}
+
+beforeEach(async () => {
+  await env.DB.prepare(`DELETE FROM messages`).run();
+  await env.DB.prepare(`DELETE FROM channels`).run();
+  await env.DB.prepare(`DELETE FROM cron_runs`).run();
+  await env.DB.prepare(`DELETE FROM ai_settings`).run();
+});
 
 /**
  * Cloudflare Cron Triggers are UTC-only ("Cron Triggers execute on UTC time")
@@ -102,5 +116,80 @@ describe('Tehran timestamp rendering', () => {
     expect(formatTehranDateTimeOrDash(null)).toBe('—');
     expect(formatTehranDateTimeOrDash('not-a-date')).toBe('—');
     expect(formatTehranDateTime(undefined)).toBeNull();
+  });
+});
+
+describe('canonical timestamps stay UTC', () => {
+  it('stores ran_at as UTC ISO while rendering Tehran time for the admin', async () => {
+    // A run that started at 20:30 UTC is 00:00 Tehran the next day.
+    const startedAtIso = '2026-07-15T20:30:00.000Z';
+
+    await env.DB.prepare(
+      `INSERT INTO cron_runs (trigger_name, ran_at, status, finished_at)
+       VALUES ('cron', ?1, 'success', ?1)`
+    )
+      .bind(startedAtIso)
+      .run();
+
+    const row = await env.DB.prepare(
+      `SELECT ran_at FROM cron_runs ORDER BY id DESC LIMIT 1`
+    ).first<{ ran_at: string }>();
+
+    // Canonical storage is untouched: still UTC, still ISO-8601 with Z.
+    expect(row?.ran_at).toBe(startedAtIso);
+    expect(row?.ran_at.endsWith('Z')).toBe(true);
+    expect(new Date(row!.ran_at).toISOString()).toBe(startedAtIso);
+
+    // Only the presentation layer converts, and it converts to Tehran.
+    const shown = formatTehranDateTimeOrDash(row!.ran_at);
+    expect(shown).not.toBe('—');
+    // 20:30 UTC + 03:30 = 00:00 Tehran on the FOLLOWING day.
+    expect(shown).toContain('۰۰:۰۰');
+    // The raw UTC clock time must never be presented as if it were Tehran time.
+    expect(shown).not.toContain('۲۰:۳۰');
+    // fa-IR renders the Jalali calendar: 2026-07-16 Tehran is 1405/04/25, and
+    // the day must have rolled forward from the 15th (1405/04/24).
+    expect(shown).toContain('۱۴۰۵');
+    expect(shown).toContain('۲۵');
+    expect(shown).not.toContain('۲۴');
+  });
+
+  it('keeps every stored timestamp column in UTC', async () => {
+    const ch = await env.DB
+      .prepare(`INSERT INTO channels (channel_username, enabled) VALUES ('tz_probe_chan', 1)`)
+      .run();
+    await env.DB.prepare(
+      `INSERT INTO messages (source_channel_id, telegram_message_id, message_date, message_text, source_url)
+       VALUES (?1, 1, '2026-07-15T20:30:00.000Z', 'body', 'https://t.me/tz_probe_chan/1')`
+    )
+      .bind(Number(ch.meta.last_row_id))
+      .run();
+
+    const row = await env.DB.prepare(
+      `SELECT message_date, created_at FROM messages ORDER BY id DESC LIMIT 1`
+    ).first<{ message_date: string; created_at: string }>();
+
+    expect(row?.message_date).toBe('2026-07-15T20:30:00.000Z');
+    expect(row?.created_at.endsWith('Z')).toBe(true);
+  });
+});
+
+describe('manual processing is independent of the cron schedule', () => {
+  it('runs the same pipeline through the manual trigger without touching cron config', async () => {
+    const outcome = await runNewsPipeline(env.DB, testEnv(), {
+      trigger: 'manual',
+      log: false,
+    });
+
+    // The manual path is labelled 'manual' and is not tied to any cron firing.
+    expect(outcome.trigger).toBe('manual');
+    expect(CRON).toEqual(['30 * * * *']);
+    expect(CRON).toHaveLength(1);
+
+    // Bookkeeping still records which trigger produced the run.
+    const row = await env.DB.prepare(
+      `SELECT trigger_name FROM cron_runs ORDER BY id DESC LIMIT 1`
+    ).first<{ trigger_name: string }>();
+    expect(row?.trigger_name).toBe('manual');
   });
 });
