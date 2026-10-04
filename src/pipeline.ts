@@ -11,6 +11,7 @@ import { filterPendingMessages } from './adFilterStage';
 import { collectAll } from './collector';
 import { deriveCronStatus, finishCronRun, startCronRun, type CronStatus } from './cronRuns';
 import { runImportanceRanking } from './newsRanking';
+import { isCollectionOnly } from './processingMode';
 import { collectRss } from './rssCollector';
 import { resolveBaleDelivery, resolveDestination, runPublishing } from './publisher';
 import { resolveAiApiKey } from './openrouter';
@@ -21,6 +22,10 @@ import type { Env } from './types';
  * Pipeline shape: collect → advertisement filter → summarize → publish.
  * The expected stage count is owned by deriveCronStatus(); a successful run
  * must reach it, which is asserted in the tests so the two cannot drift.
+ *
+ * Collection-only mode (processingMode.ts) shortens the shape to just
+ * `collect`: nothing is filtered, summarized, ranked or published — the
+ * system only fetches and stores raw news.
  */
 
 export interface PipelineOutcome {
@@ -31,6 +36,11 @@ export interface PipelineOutcome {
   status: CronStatus;
   stagesRun: number;
   itemFailures: number;
+  /**
+   * True when this run only collected news: filter/summarize/rank/publish are
+   * null because they were intentionally skipped, not because they failed.
+   */
+  collectionOnly: boolean;
   /** Stage-level errors only; each is a short, secret-free message. */
   errors: string[];
   collection: { enabledChannels: number; succeeded: number; failed: number; inserted: number } | null;
@@ -53,13 +63,19 @@ export interface PipelineOutcome {
 export async function runNewsPipeline(
   db: D1Database,
   env: Env,
-  opts: { trigger?: string; log?: boolean } = {}
+  opts: { trigger?: string; log?: boolean; modeOverride?: 'collect' | 'process' } = {}
 ): Promise<PipelineOutcome> {
   const trigger = opts.trigger ?? 'manual';
   const startedAt = Date.now();
   const errors: string[] = [];
   let stagesRun = 0;
   let runId = 0;
+
+  // modeOverride lets a manual run force a specific mode for that run only;
+  // otherwise the persisted admin setting decides.
+  const collectionOnly = opts.modeOverride
+    ? opts.modeOverride === 'collect'
+    : await isCollectionOnly(db).catch(() => false);
 
   try {
     runId = await startCronRun(db, trigger);
@@ -89,32 +105,44 @@ export async function runNewsPipeline(
       inserted: telegram.inserted + rss.inserted,
     };
   });
-  // Local, offline filter. Runs before any OpenRouter request is made.
-  const filter = await stage('filter', () => filterPendingMessages(db));
-  const summarization = await stage('summarize', () =>
-    runSummarization(db, { apiKey: resolveAiApiKey(env) })
-  );
-  // Global importance ranking across every channel, once per run. Never throws:
-  // a failure leaves importance untouched and publishing continues.
-  const ranking = await stage('rank', () =>
-    runImportanceRanking(db, { apiKey: resolveAiApiKey(env) })
-  );
-  const publishing = await stage('publish', () =>
-    runPublishing(db, {
-      token: env.TELEGRAM_BOT_TOKEN,
-      destination: resolveDestination(env) ?? undefined,
-      // Optional: skips the single run image when the binding is not configured.
-      browser: env.BROWSER,
-      // Optional best-effort Bale mirror of the Telegram output.
-      bale: resolveBaleDelivery(env) ?? undefined,
-    })
-  );
+
+  // Collection-only mode: stop here. No filtering, summarization, ranking or
+  // publishing — the run just stores raw news. All four stages stay null and
+  // the status is derived against a single expected stage, so the run records
+  // "success" instead of a fake "partial".
+  let filter: { checked: number; filtered: number; passed: number } | null = null;
+  let summarization: Awaited<ReturnType<typeof runSummarization>> | null = null;
+  let ranking: Awaited<ReturnType<typeof runImportanceRanking>> | null = null;
+  let publishing: Awaited<ReturnType<typeof runPublishing>> | null = null;
+
+  if (!collectionOnly) {
+    // Local, offline filter. Runs before any OpenRouter request is made.
+    filter = await stage('filter', () => filterPendingMessages(db));
+    summarization = await stage('summarize', () =>
+      runSummarization(db, { apiKey: resolveAiApiKey(env) })
+    );
+    // Global importance ranking across every channel, once per run. Never throws:
+    // a failure leaves importance untouched and publishing continues.
+    ranking = await stage('rank', () =>
+      runImportanceRanking(db, { apiKey: resolveAiApiKey(env) })
+    );
+    publishing = await stage('publish', () =>
+      runPublishing(db, {
+        token: env.TELEGRAM_BOT_TOKEN,
+        destination: resolveDestination(env) ?? undefined,
+        // Optional: skips the single run image when the binding is not configured.
+        browser: env.BROWSER,
+        // Optional best-effort Bale mirror of the Telegram output.
+        bale: resolveBaleDelivery(env) ?? undefined,
+      })
+    );
+  }
 
   const itemFailures =
     (collection?.failed ?? 0) +
     (summarization?.failed.length ?? 0) +
     (publishing?.failures.length ?? 0);
-  const status = deriveCronStatus(stagesRun, errors.length, itemFailures);
+  const status = deriveCronStatus(stagesRun, errors.length, itemFailures, collectionOnly ? 1 : undefined);
 
   const outcome: PipelineOutcome = {
     trigger,
@@ -123,6 +151,7 @@ export async function runNewsPipeline(
     status,
     stagesRun,
     itemFailures,
+    collectionOnly,
     errors,
     collection: collection && {
       enabledChannels: collection.enabledChannels,
@@ -163,6 +192,7 @@ export async function runNewsPipeline(
         runId,
         status,
         stagesRun,
+        collectionOnly,
         collection: outcome.collection,
         filteredAdvertisements: outcome.filteredAdvertisements,
         summarization: outcome.summarization,

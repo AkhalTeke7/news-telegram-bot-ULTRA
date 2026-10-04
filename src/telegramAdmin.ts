@@ -363,6 +363,7 @@ export function renderTestMessageResult(result: TestMessageResult): string {
 export function renderPipelineResult(outcome: {
   status: string;
   ranAt: string;
+  collectionOnly?: boolean;
   collection: { inserted: number } | null;
   filteredAdvertisements: number;
   summarization: { summarized: number } | null;
@@ -372,19 +373,27 @@ export function renderPipelineResult(outcome: {
 }): string {
   const header =
     outcome.status === 'success'
-      ? '✅ پردازش انجام شد.'
+      ? outcome.collectionOnly === true
+        ? '✅ جمع‌آوری انجام شد (حالت فقط جمع‌آوری).'
+        : '✅ پردازش انجام شد.'
       : outcome.status === 'partial'
         ? '⚠️ پردازش با خطاهای جزئی تمام شد.'
         : '❌ پردازش با خطا مواجه شد.';
+
+  const processingLines = outcome.collectionOnly === true
+    ? ['حالت فقط جمع‌آوری فعال است؛ خلاصه‌سازی و انتشار انجام نشد.']
+    : [
+        `فیلتر تبلیغات: ${outcome.filteredAdvertisements}`,
+        `خلاصه‌سازی: ${outcome.summarization?.summarized ?? 0}`,
+        `انتشار: ${outcome.publishing?.published ?? 0}`,
+      ];
 
   return [
     header,
     '',
     `زمان اجرا: ${formatTehranDateTimeOrDash(outcome.ranAt)} به وقت تهران`,
     `جمع‌آوری: ${outcome.collection?.inserted ?? 0}`,
-    `فیلتر تبلیغات: ${outcome.filteredAdvertisements}`,
-    `خلاصه‌سازی: ${outcome.summarization?.summarized ?? 0}`,
-    `انتشار: ${outcome.publishing?.published ?? 0}`,
+    ...processingLines,
     ...(outcome.publishing?.bale
       ? [`بیل: ${outcome.publishing.bale.sent} ارسال${
           outcome.publishing.bale.failed > 0
