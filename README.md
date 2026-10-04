@@ -293,8 +293,9 @@ curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
   -d allowed_updates='["message","callback_query"]'
 ```
 
-The Worker exposes the admin panel at `/` (Persian RTL), `GET /healthz`, the Telegram
-webhook at `POST /api/telegram/webhook`, and an authenticated `GET /api/status`
+The Worker exposes the admin panel at `/` (Persian RTL), `GET /healthz`, the exact
+renderer preview at `GET /preview/news-image`, the Telegram webhook at
+`POST /api/telegram/webhook`, and an authenticated `GET /api/status`
 diagnostics endpoint. Everything else under `/api` requires the admin session cookie.
 
 ## Admin API
