@@ -1,21 +1,24 @@
-# Telegram News Summarizer Bot
+# Persian News Bot for Telegram and Bale
 
-Persian (Farsi) RTL news bot on Cloudflare Workers. Every hour it reads public Telegram
-source channels, summarizes the last hour of posts in Persian using **free OpenCode/Zen
-models only**, and publishes the summaries to one destination Telegram channel.
+Persian (Farsi) RTL news bot on Cloudflare Workers. Every hour it collects news from public
+Telegram channels and configured RSS feeds, filters advertisements, summarizes and ranks
+stories with **free OpenCode/Zen models only**, renders important stories as a Vazirmatn
+HTML screenshot with Cloudflare Browser Run, and publishes text and images to Telegram
+and/or Bale.
 
-No paid models, no MTProto, no external services, no OpenRouter.
+RSS sources currently include BBC Persian, Zoomit, Mobile.ir, and IRIB News. No paid
+models, MTProto, OpenRouter, or committed credentials are required.
 
 ## Pipeline
 
 ```
 Cron (hourly, at :00 Tehran time)
-  └─ collect   → GET https://t.me/s/<username>   → D1 `messages`   (1-hour window, deduped)
+  └─ collect   → Telegram previews + RSS feeds  → D1 `messages`   (1-hour window, deduped)
   └─ filter    → local advertisement filter      → filter_status    (no AI, no network)
   └─ summarize → POST https://opencode.ai/zen/v1/chat/completions → summary_text + title
   └─ rank      → one global AI comparison        → importance (1–5)
-  └─ publish   → Browser Run HTML screenshot + Telegram sendPhoto (important news)
-             └─ text digest → Telegram sendMessage
+  └─ publish   → Browser Run HTML screenshot + Telegram/Bale sendPhoto (important news)
+             └─ text digest → Telegram/Bale sendMessage
 ```
 
 Each stage is isolated: one failing channel, message, or model never stops the rest.
@@ -26,8 +29,10 @@ after its work is persisted.
 
 - Node.js 20+
 - A Cloudflare account
-- A Telegram bot that is **administrator of the destination channel**
+- A Telegram bot that is **administrator of the destination channel** (optional if only Bale is used)
+- A Bale bot and destination channel (optional)
 - An OpenCode/Zen API key
+- A Cloudflare Browser binding for image generation
 
 ## 1. D1 database
 
@@ -61,6 +66,7 @@ Migrations, in order:
 | `0008_title_importance.sql` | AI `title` and global `importance` (1–5) for ranking/image selection |
 | `0009_ai_editorial_metadata.sql` | AI highlights, confidence, category, processing timestamp, and ranking indexes |
 | `0010_rss_sources.sql` | Configurable BBC Persian, technology, and Iranian RSS source registry |
+| `0011_rss_channel_metadata.sql` | Marks RSS-backed channels and stores their feed URLs |
 
 ## 2. Telegram bot setup
 
@@ -80,6 +86,7 @@ npx wrangler secret put TELEGRAM_BOT_TOKEN             # from BotFather
 npx wrangler secret put BALE_BOT_TOKEN                 # from Bale bot management
 npx wrangler secret put OPENCODE_API_KEY               # https://opencode.ai
 npx wrangler secret put TELEGRAM_DESTINATION_CHANNEL   # @your_channel or -1001234567890
+npx wrangler secret put BALE_DESTINATION_CHANNEL       # @channel or numeric chat id
 npx wrangler secret put TELEGRAM_ADMIN_USER_ID         # numeric Telegram User.id
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET        # X-Telegram-Bot-Api-Secret-Token
 ```
@@ -87,15 +94,29 @@ npx wrangler secret put TELEGRAM_WEBHOOK_SECRET        # X-Telegram-Bot-Api-Secr
 | Variable | Secret | Purpose |
 |---|---|---|
 | `ADMIN_PASSWORD` | yes | Single-owner web admin login. Unlocks the session cookie. |
-| `TELEGRAM_BOT_TOKEN` | yes | Bot API: verify added channels, publish summaries, serve the Telegram admin UI. |
+| `TELEGRAM_BOT_TOKEN` | yes | Telegram Bot API: verify channels, publish summaries, and serve the Telegram admin UI. |
+| `BALE_BOT_TOKEN` | yes | Bale Business Bot API token used for Bale delivery. |
 | `OPENCODE_API_KEY` | yes | OpenCode/Zen chat completions. |
-| `TELEGRAM_DESTINATION_CHANNEL` | yes (not a credential, kept out of git anyway) | Where summaries are published. |
+| `TELEGRAM_DESTINATION_CHANNEL` | yes (configuration, kept server-side) | Telegram destination: `@channel` or numeric id. |
+| `BALE_DESTINATION_CHANNEL` | yes (configuration, kept server-side) | Bale destination: `@channel` or numeric chat id. |
 | `TELEGRAM_ADMIN_USER_ID` | yes | Numeric Telegram `User.id` allowed to administer the bot over Telegram. |
 | `TELEGRAM_WEBHOOK_SECRET` | yes | Value Telegram echoes back in `X-Telegram-Bot-Api-Secret-Token`; must be ≥16 chars. |
 
 `TELEGRAM_DESTINATION_CHANNEL` accepts `@channel_username` or a numeric channel id such as
 `-1001234567890`. It is read only in `src/publisher.ts` and is never returned by an API,
 shown in the UI, or written to the database.
+
+## Bale delivery
+
+Bale delivery uses the official Bale Business Bot API at `https://tapi.bale.ai/business/bot`.
+The transport supports both `sendMessage` and `sendPhoto`, including PNG multipart upload.
+Add the Bale bot to the destination channel with permission to post, then configure
+`BALE_BOT_TOKEN` and `BALE_DESTINATION_CHANNEL`. Telegram and Bale configuration is
+independent: either destination may be enabled, or both may be enabled.
+
+Bale credentials must never be placed in `wrangler.json`, committed to Git, or included
+in `.dev.vars` committed files. Use `wrangler secret put` for tokens. Destination IDs
+are also kept server-side to avoid exposing deployment configuration through the API.
 
 ## Publishing format
 
