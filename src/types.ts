@@ -7,6 +7,9 @@ export interface Env {
   BROWSER?: import('./newsImage').BrowserBinding;
   /** Bot token from BotFather. Never exposed to the frontend. */
   TELEGRAM_BOT_TOKEN?: string;
+  /** Optional Bale Business Bot credentials. Secrets only. */
+  BALE_BOT_TOKEN?: string;
+  BALE_DESTINATION_CHANNEL?: string;
   /** Single-owner admin password. Never exposed to the frontend. */
   ADMIN_PASSWORD: string;
   /** OpenCode Zen key. Wrangler secret only; never logged or persisted. */

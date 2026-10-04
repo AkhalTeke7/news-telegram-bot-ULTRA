@@ -77,6 +77,7 @@ Never commit real values. Production secrets are set through Wrangler:
 ```bash
 npx wrangler secret put ADMIN_PASSWORD                 # admin panel password
 npx wrangler secret put TELEGRAM_BOT_TOKEN             # from BotFather
+npx wrangler secret put BALE_BOT_TOKEN                 # from Bale bot management
 npx wrangler secret put OPENCODE_API_KEY               # https://opencode.ai
 npx wrangler secret put TELEGRAM_DESTINATION_CHANNEL   # @your_channel or -1001234567890
 npx wrangler secret put TELEGRAM_ADMIN_USER_ID         # numeric Telegram User.id
