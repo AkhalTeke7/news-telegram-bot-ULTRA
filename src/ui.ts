@@ -433,11 +433,25 @@ function aiErrorLabel(category) {
     config_missing: 'کلید API تنظیم نشده',
     no_free_model: 'مدل رایگانی در دسترس نیست',
     rate_limited: 'محدودیت نرخ درخواست',
-    provider_error: 'خطای سرویس‌دهنده مدل',
+    rate_limited_minute: 'محدودیت نرخ درخواست (سطح حساب، هر دقیقه)',
+    rate_limited_daily: 'محدودیت روزانهٔ درخواست رایگان (سطح حساب)',
+    provider_error: 'خطای سرویس‌دهندهٔ مدل',
     invalid_response: 'پاسخ نامعتبر مدل (JSON خراب)',
     timeout: 'اتمام زمان انتظار',
     network: 'خطای شبکه',
     empty_after_filter: 'متن پس از فیلتر خالی شد',
+    ranking_failed: 'رتبه‌بندی ناموفق بود',
+  };
+  return map[category] || category;
+}
+
+function publishErrorLabel(category) {
+  const map = {
+    invalid_source_url: 'لینک منبع نامعتبر',
+    rate_limited: 'محدودیت نرخ تلگرام',
+    telegram_error: 'خطای تلگرام',
+    network: 'خطای شبکه',
+    run_limit: 'سقف پیام در هر اجرا',
   };
   return map[category] || category;
 }
@@ -486,14 +500,20 @@ async function runPipeline(mode, btn) {
         }
       }
       if (r.ranking) {
-        lines.push('رتبه‌بندی: ' + r.ranking.important + ' خبر مهم از ' + r.ranking.ranked);
+        lines.push('رتبه‌بندی: ' + r.ranking.important + ' خبر مهم از ' + r.ranking.ranked + (r.ranking.error ? ' — ناموفق: ' + aiErrorLabel(r.ranking.error) : ''));
       }
       if (r.publishing) {
-        lines.push('انتشار: ' + r.publishing.published + ' از ' + r.publishing.eligible + (r.publishing.bale ? ' — بیل: ' + r.publishing.bale.sent + ' ارسال' : ''));
+        lines.push('انتشار: ' + r.publishing.published + ' از ' + r.publishing.eligible + (r.publishing.rateLimited ? ' (محدودیت نرخ تلگرام)' : '') + (r.publishing.bale ? ' — بیل: ' + r.publishing.bale.sent + ' ارسال' : ''));
+        const pubCats = r.publishing.failureCategories || {};
+        const pubKeys = Object.keys(pubCats);
+        if (pubKeys.length > 0) {
+          lines.push('علت خطاهای انتشار: ' + pubKeys.map((k) => publishErrorLabel(k) + ' (' + pubCats[k] + ')').join('، '));
+        }
         if (r.publishing.image) {
-          lines.push('تصویر خبری: ' + (r.publishing.image.sent
-            ? 'ارسال شد (' + r.publishing.image.cards + ' کارت)'
-            : 'ارسال نشد — ' + imageReasonLabel(r.publishing.image.reason)));
+          const img = r.publishing.image;
+          lines.push('تصویر خبری: ' + (img.sent
+            ? 'ارسال شد (' + img.slides + ' اسلاید، ' + img.items + ' خبر' + (img.ticker > 0 ? '، ' + img.ticker + ' عنوان دیگر' : '') + ')'
+            : 'ارسال نشد — ' + imageReasonLabel(img.reason) + (img.detail ? ' (' + img.detail + ')' : '')));
         }
       }
     } else {
@@ -537,7 +557,7 @@ $('testImageBtn').onclick = async () => {
   setMsg($('toolsMsg'), 'در حال ساخت و ارسال تصویر آزمایشی…', null);
   try {
     const r = await api('/api/telegram/test-image', { method: 'POST', body: '{}' });
-    setMsg($('toolsMsg'), '✅ تصویر آزمایشی ارسال شد — ' + r.cards + ' کارت، ' + r.ticker + ' عنوان دیگر.' + baleNote(r.bale), 'ok');
+    setMsg($('toolsMsg'), '✅ تصویر آزمایشی ارسال شد — ' + r.cards + ' تصویر' + (r.ticker > 0 ? '، ' + r.ticker + ' عنوان دیگر' : '') + '.' + baleNote(r.bale), 'ok');
   } catch (e) {
     setMsg($('toolsMsg'), e.message, 'err');
   }

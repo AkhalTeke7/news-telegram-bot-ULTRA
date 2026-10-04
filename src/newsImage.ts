@@ -1,26 +1,30 @@
 /**
- * One Liquid Glass news image per pipeline run.
+ * White-template news slides for pipeline runs.
  *
- * Purpose: a single high-resolution "front page" for the whole run, rendered through
- * Cloudflare Browser Run, showing the most important news across ALL enabled
- * source channels.
+ * Purpose: a per-run ALBUM (Telegram `sendMediaGroup` slideshow) built from a
+ * FIXED HTML layout with clearly defined sections — header (run title + Tehran
+ * date/time stamp), news board (the 2×2 grid carrying FOUR news items per
+ * slide: emoji + headline + introductory text + source), optional overflow
+ * ticker on the last slide, and footer (source credits + signature).
+ *
+ * Every slide covers four news items, so the whole run's news is spread across
+ * a swipeable slideshow instead of being squeezed into one composite image.
+ * The headline and introductory text are the AI-authored `title` and `summary`
+ * of each item — the exact text the site/source content was condensed into —
+ * so a slide exists only for news the AI actually processed (no AI, no slide).
  *
  * Design constraints this module exists to satisfy:
- *  - AT MOST ONE Browser Run request per pipeline execution. Callers must
- *    invoke `renderRunImage()` once, outside any per-channel loop. Free-plan
- *    Quick Actions are rate limited to roughly one request per 10s, so a
- *    per-channel image would both break the budget and hit 429.
+ *  - at most `MAX_ALBUM_SLIDES` Browser Run requests per pipeline execution
+ *    (one per slide), spaced by `DEFAULT_IMAGE_RENDER_SPACING_MS`, because the
+ *    Workers Free plan allows roughly one Quick Action every 10 seconds. A 429
+ *    from Browser Run skips the remaining slides instead of hammering.
  *  - Rasterization happens inside Browser Run, never in this Worker: no WASM,
  *    no canvas, no local PNG encoding. The Worker only builds an HTML string.
- *  - The image is never persisted. The PNG exists as one local variable for the
- *    duration of the send and is dropped immediately afterwards; nothing is
- *    written to D1, R2 or any other store.
- *  - The image carries ALL of the run's news: the top four items as cards and
- *    every remaining headline in a horizontal ticker strip below them, one
- *    brief single-line entry per item.
- *
- * The image is completely independent of the per-channel text digests: those
- * are still built and sent by `runPublishing()` exactly as before.
+ *  - The images are never persisted. Each PNG exists as one local variable
+ *    for the duration of the send and is dropped immediately afterwards;
+ *    nothing is written to D1, R2 or any other store.
+ *  - The album is completely independent of the per-channel text digests:
+ *    those are still built and sent by `runPublishing()` exactly as before.
  */
 
 import type { PublishableMessage } from './publisher';
@@ -35,7 +39,12 @@ import { formatTehranDateTime, tehranParts } from './time';
  */
 export const IMAGE_WIDTH = 2560;
 export const IMAGE_HEIGHT = 1440;
+/** One slide covers four news items: the fixed 2×2 grid of the template. */
 export const MAX_IMAGE_ITEMS = 4;
+/** Slides per album; Telegram `sendMediaGroup` accepts at most ten photos. */
+export const MAX_ALBUM_SLIDES = 10;
+/** News items the whole slideshow can carry (MAX_ALBUM_SLIDES × 4). */
+export const MAX_ALBUM_NEWS = MAX_ALBUM_SLIDES * MAX_IMAGE_ITEMS;
 
 /** Below this, a single sentence is too short to work as a headline. */
 const MIN_HEADLINE_CHARS = 24;
@@ -45,9 +54,34 @@ const CARD_TITLE_MAX_CHARS = 90;
 export const MAX_TICKER_ITEMS = 8;
 export const TICKER_MAX_CHARS = 72;
 
-/** The Browser Run binding, structurally typed so tests can supply a fake. */
+/**
+ * The Browser Run binding, structurally typed so tests can supply a fake.
+ *
+ * Two call shapes are accepted because the Workers binding has been exposed
+ * under different names across its lifetime: the Quick Action form
+ * (`quickAction('screenshot', …)`) and the direct form (`screenshot(…)`).
+ * Whichever the deployment exposes is used; when neither exists the render
+ * fails with a typed error instead of a silent "render_failed" mystery.
+ */
 export interface BrowserBinding {
-  quickAction(action: 'screenshot', payload: Record<string, unknown>): Promise<Response>;
+  quickAction?(action: 'screenshot', payload: Record<string, unknown>): Promise<Response>;
+  screenshot?(payload: Record<string, unknown>): Promise<Response>;
+}
+
+/**
+ * Dispatches one screenshot request through whichever binding method exists.
+ * All renderers go through here, so the dispatch lives in exactly one place.
+ */
+export async function browserScreenshot(
+  browser: BrowserBinding,
+  payload: Record<string, unknown>
+): Promise<Response> {
+  if (typeof browser.quickAction === 'function') return browser.quickAction('screenshot', payload);
+  if (typeof browser.screenshot === 'function') return browser.screenshot(payload);
+  throw new NewsImageError(
+    'browser_run',
+    'Browser Run binding exposes no screenshot method (quickAction/screenshot).'
+  );
 }
 
 export interface ImageNewsItem {
@@ -278,12 +312,17 @@ function esc(value: string): string {
 const ACCENTS = ['#1fb98a', '#f0b34a', '#5b9dff', '#d34f74'];
 
 /**
- * Frosted "liquid glass" frame as HTML/CSS: pastel mesh background, glossy
+ * Frosted white "liquid glass" frame as HTML/CSS: pastel mesh background, glossy
  * bubbles, a big glass board holding one glass card per news item. Layout:
  * 1 item centred, 2 side by side, 3 as 1-over-2, 4 as 2x2. Text is laid out by
  * the browser, so Persian shaping is native.
+ *
+ * `layout: 'four'` forces the FIXED 2×2 news board — the layout every full
+ * album slide uses, so the slideshow has one constant template with clearly
+ * defined sections (header / news board / ticker / footer). The adaptive
+ * layouts remain only for the trailing partial slide and the preview page.
  */
-export function buildImageHtml(frame: ImageFrame): string {
+export function buildImageHtml(frame: ImageFrame, layout: 'auto' | 'four' = 'auto'): string {
   // The four-card maximum is enforced here as well as in selectTopNews(), so the
   // template can never lay out a fifth card outside the 2x2 grid.
   const items = frame.items.slice(0, MAX_IMAGE_ITEMS);
@@ -301,7 +340,10 @@ export function buildImageHtml(frame: ImageFrame): string {
     })
     .join('\n        ');
 
-  const grid = ['one', 'two', 'three', 'four'][Math.max(0, Math.min(3, items.length - 1))];
+  const grid =
+    layout === 'four'
+      ? 'four' // FIXED slide layout: always the 2×2 news board.
+      : ['one', 'two', 'three', 'four'][Math.max(0, Math.min(3, items.length - 1))];
   const tickerItems = frame.ticker ?? [];
 
   return `<!DOCTYPE html>
@@ -441,6 +483,41 @@ export function buildRunFrame(
   };
 }
 
+/**
+ * Splits the run's selected news into slides of four (the last slide may hold
+ * fewer). The slideshow covers the whole run this way: nothing is relegated to
+ * a tiny ticker line while slide capacity remains.
+ */
+export function chunkSlides(
+  items: readonly ImageNewsItem[],
+  perSlide: number = MAX_IMAGE_ITEMS
+): ImageNewsItem[][] {
+  const chunks: ImageNewsItem[][] = [];
+  for (let i = 0; i < items.length; i += perSlide) {
+    chunks.push(items.slice(i, i + perSlide));
+  }
+  return chunks;
+}
+
+/**
+ * Builds the frame of ONE slide: the same fixed white template, with the slide
+ * number in the header so a reader swiping through the album knows where they
+ * are («اسلاید ۲ از ۵»). Single-slide albums keep the plain kicker.
+ */
+export function buildSlideFrame(
+  items: ImageNewsItem[],
+  now: Date,
+  slideIndex: number,
+  slideCount: number,
+  ticker: TickerNewsItem[] = []
+): ImageFrame {
+  const frame = buildRunFrame(items, now, ticker);
+  if (slideCount > 1) {
+    frame.kicker = `گزارش خبری خودکار — اسلاید ${faDigits(slideIndex + 1)} از ${faDigits(slideCount)}`;
+  }
+  return frame;
+}
+
 export interface RenderedImage {
   png: ArrayBuffer;
   bytes: number;
@@ -511,13 +588,14 @@ export async function renderRunImage(
 
   let response: Response;
   try {
-    response = await opts.browser.quickAction('screenshot', {
+    response = await browserScreenshot(opts.browser, {
       html,
       viewport: { width: IMAGE_WIDTH, height: IMAGE_HEIGHT, deviceScaleFactor: 1 },
       screenshotOptions: { type: 'png', fullPage: false, captureBeyondViewport: false },
       gotoOptions: { waitUntil: 'networkidle0', timeout: opts.timeoutMs ?? 20_000 },
     });
   } catch (e) {
+    if (e instanceof NewsImageError) throw e;
     throw new NewsImageError('browser_run', e instanceof Error ? e.message : String(e));
   }
 
@@ -540,4 +618,273 @@ export async function renderRunImage(
     items: selected,
     tickerCount: ticker.items.length,
   };
+}
+
+/* ------------------------------------------------------------- the album -- */
+
+/**
+ * Spacing between two Browser Run screenshot requests. The Workers Free plan
+ * allows about one Quick Action per 10 seconds; the pipeline passes this value
+ * (configurable via IMAGE_RENDER_SPACING_MS) so a multi-slide album never
+ * trips it.
+ */
+export const DEFAULT_IMAGE_RENDER_SPACING_MS = 10_500;
+/** One retry when a screenshot comes back HTTP 429 (Quick Action rate limit). */
+export const SCREENSHOT_RETRIES = 2;
+
+export const sleepMs = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+
+/** One fully rendered slide of the album: a PNG plus the news it carries. */
+export interface RenderedSlideImage {
+  /** The slide's news, in display (importance) order — at most four items. */
+  items: ImageNewsItem[];
+  png: ArrayBuffer;
+  bytes: number;
+  width: number;
+  height: number;
+}
+
+export interface RenderedAlbum {
+  /** Successfully rendered slides, in display order. */
+  slides: RenderedSlideImage[];
+  /** News items across every rendered slide. */
+  selected: number;
+  /** Remaining headlines for the last slide's ticker (overflow line included). */
+  ticker: TickerNewsItem[];
+  /** Headlines beyond MAX_TICKER_ITEMS (already folded into the last line). */
+  hidden: number;
+  /** Total time spent inside Browser Run, excluding waits. */
+  browserRunMs: number;
+  /** Selected slides that could not be rendered; the album degrades gracefully. */
+  skipped: number;
+  /** Short, safe reason for the first failure (stage/status only). */
+  error?: string;
+}
+
+export interface RenderAlbumOptions {
+  browser: BrowserBinding | undefined;
+  items: readonly PublishableMessage[];
+  now?: Date;
+  timeoutMs?: number;
+  /** Wait between two slide renders; 0 = no spacing (tests). */
+  spacingMs?: number;
+  /** Injectable wait, so tests never sleep for real. */
+  sleepImpl?: (ms: number) => Promise<void>;
+}
+
+/** Short, secret-free reason for a render failure (stage + status only). */
+function describeRenderError(error: unknown): string {
+  if (error instanceof NewsImageError) {
+    return `${error.stage}: ${error.message}`.slice(0, 120);
+  }
+  const name = error instanceof Error ? error.name : 'Error';
+  const text = error instanceof Error ? error.message : String(error);
+  return `${name}: ${text}`.slice(0, 120);
+}
+
+/**
+ * Renders THE run album: a slideshow in which every slide covers four news
+ * items (the last one may hold fewer), laid out by the FIXED white template.
+ *
+ * Selection takes the run's most important news up to the album capacity
+ * (`MAX_ALBUM_SLIDES` × 4 items); when AI limits left fewer summarized items,
+ * the slideshow is simply shorter. Whatever still does not fit rides along as
+ * the last slide's ticker strip and caption overflow line.
+ *
+ * One Browser Run screenshot per slide, spaced so the free-tier Quick Action
+ * limit (≈1 request / 10s) is respected. Failures degrade instead of failing
+ * the run: a slide that cannot be rendered is skipped, and once Browser Run
+ * answers 429 twice the remaining slides are skipped without further requests.
+ * Returns null when there is nothing worth showing or no binding configured —
+ * in both cases no Browser Run request is made at all.
+ */
+export async function renderRunAlbum(opts: RenderAlbumOptions): Promise<RenderedAlbum | null> {
+  // The whole run's eligible news, ranked: importance first, recency and id as
+  // stable tie-breakers. Only items the AI actually summarized (headline +
+  // introductory text) can enter a slide.
+  const selected = selectTopNews(opts.items, MAX_ALBUM_NEWS);
+  if (selected.length === 0) return null;
+  if (!opts.browser) return null;
+
+  const slideChunks = chunkSlides(selected);
+  const slideCount = slideChunks.length;
+
+  // Overflow beyond the album capacity: the last slide's ticker strip keeps
+  // the old "سایر عناوین" behavior alive, exactly like the single-image era.
+  const tickerSelection = selectTickerNews(opts.items, new Set(selected.map((s) => s.id)));
+  const ticker: TickerNewsItem[] = [...tickerSelection.items];
+  if (tickerSelection.hidden > 0) {
+    ticker.push({
+      id: 0,
+      channelUsername: '',
+      text: `و ${faDigits(tickerSelection.hidden)} خبر دیگر`,
+      more: true,
+    });
+  }
+
+  const sleepImpl = opts.sleepImpl ?? sleepMs;
+  const spacing = opts.spacingMs ?? 0;
+  const slides: RenderedSlideImage[] = [];
+  let browserRunMs = 0;
+  let skipped = 0;
+  let firstError: string | undefined;
+  /** Set once Browser Run itself rate limits us: stop asking for more slides. */
+  let rateLimited = false;
+
+  for (let i = 0; i < slideChunks.length; i++) {
+    if (rateLimited) {
+      skipped++;
+      continue;
+    }
+    if (i > 0) await sleepImpl(spacing);
+
+    const chunk = slideChunks[i];
+    // Every FULL slide uses the fixed 2×2 news board; only a trailing partial
+    // slide lets the adaptive grid fill the board (same template, same
+    // sections — just 1-3 cards spread over the 2×2 area).
+    const layout: 'auto' | 'four' = chunk.length === MAX_IMAGE_ITEMS ? 'four' : 'auto';
+    const isLastSlide = i === slideCount - 1;
+    const html = buildImageHtml(
+      buildSlideFrame(
+        chunk,
+        opts.now ?? new Date(),
+        i,
+        slideCount,
+        // Only the last slide can carry the overflow ticker.
+        isLastSlide ? ticker : []
+      ),
+      layout
+    );
+    let rendered: RenderedSlideImage | null = null;
+
+    for (let attempt = 1; attempt <= SCREENSHOT_RETRIES && !rendered; attempt++) {
+      const started = Date.now();
+      try {
+        const response = await browserScreenshot(opts.browser, {
+          html,
+          viewport: { width: IMAGE_WIDTH, height: IMAGE_HEIGHT, deviceScaleFactor: 1 },
+          screenshotOptions: { type: 'png', fullPage: false, captureBeyondViewport: false },
+          gotoOptions: { waitUntil: 'networkidle0', timeout: opts.timeoutMs ?? 20_000 },
+        });
+        const png = await response.arrayBuffer();
+        const size = readPngSize(png);
+        browserRunMs += Date.now() - started;
+        if (response.status === 429) {
+          firstError ??= 'browser_run: HTTP 429';
+          // Quick Actions are ~1/10s on the free plan: wait once and retry.
+          // The wait reuses the caller's spacing so tests (spacing 0) stay fast.
+          if (attempt < SCREENSHOT_RETRIES && spacing > 0) {
+            await sleepImpl(spacing);
+            continue;
+          }
+          rateLimited = true;
+          break;
+        }
+        if (!response.ok || !size) {
+          throw new NewsImageError(
+            'validate',
+            `Browser Run did not return a PNG (status ${response.status})`
+          );
+        }
+        rendered = {
+          items: chunk,
+          png,
+          bytes: png.byteLength,
+          width: size.width,
+          height: size.height,
+        };
+      } catch (error) {
+        browserRunMs += Date.now() - started;
+        if (error instanceof NewsImageError) {
+          firstError ??= describeRenderError(error);
+          break; // not transient — skip this slide
+        }
+        firstError ??= describeRenderError(error);
+        break;
+      }
+    }
+
+    if (rendered) slides.push(rendered);
+    else skipped++;
+  }
+
+  return {
+    slides,
+    selected: slides.reduce((sum, slide) => sum + slide.items.length, 0),
+    ticker,
+    hidden: tickerSelection.hidden,
+    browserRunMs,
+    skipped,
+    ...(firstError ? { error: firstError } : {}),
+  };
+}
+
+/** Telegram caption limit, kept below the 1024 hard limit for headroom. */
+export const MAX_CAPTION_CHARS = 1000;
+/** One caption line per slide headline; keeps four items + header < 1000. */
+const CAPTION_HEADLINE_CHARS = 150;
+
+/** Strips control characters so a caption is always plain, single-line-safe text. */
+function cleanCaptionLine(text: string, limit: number = Number.MAX_SAFE_INTEGER): string {
+  const clean = text
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return clean.length <= limit ? clean : `${clean.slice(0, limit - 1).trimEnd()}…`;
+}
+
+/**
+ * Builds the plain-text caption of every album slide.
+ *
+ * Layout (no HTML, so neither Telegram nor Bale can reject the markup):
+ *
+ *   slide 1:  📰 اخبار لحظه‌ای — ۱۴۰۵/۰۷/۱۲ ساعت ۱۴:۳۰ تهران
+ *             {emoji} <headline>
+ *             📡 منبع: @channel
+ *             … (one pair per news item on the slide)
+ *   slide N:  {emoji} <headline> + 📡 منبع pairs
+ *             🔎 سایر عناوین: … · … · و n خبر دیگر   (overflow only)
+ *
+ * The run header lands on the first slide; when the slideshow cannot carry the
+ * whole run (more than MAX_ALBUM_NEWS items) the last slide lists what is left.
+ */
+export function buildAlbumCaptions(
+  slides: readonly (readonly ImageNewsItem[])[],
+  ticker: readonly TickerNewsItem[],
+  hidden: number,
+  now: Date
+): string[] {
+  const stamp = formatTehranDateTime(now) ?? '';
+  const overflow =
+    hidden > 0
+      ? ticker.some((t) => t.more)
+        ? ''
+        : `و ${faDigits(hidden)} خبر دیگر`
+      : '';
+
+  return slides.map((items, index) => {
+    const lines: string[] = [];
+    if (index === 0 && stamp) lines.push(`📰 اخبار لحظه‌ای — ${stamp} تهران`);
+
+    for (const item of items) {
+      const topic = topicPresentation(item.category, `${item.title} ${item.summary}`);
+      lines.push(`${topic.emoji} ${cleanCaptionLine(item.title, CAPTION_HEADLINE_CHARS)}`);
+      lines.push(`📡 منبع: ${channelLabel(item.channelUsername)}`);
+    }
+
+    if (index === slides.length - 1) {
+      const headlines = ticker.map((t) => cleanCaptionLine(t.text)).filter(Boolean);
+      if (headlines.length > 0) {
+        lines.push(`🔎 سایر عناوین: ${headlines.join(' · ')}`);
+      } else if (overflow) {
+        lines.push(`🔎 ${overflow}`);
+      }
+    }
+
+    const caption = lines.join('\n');
+    return caption.length > MAX_CAPTION_CHARS
+      ? `${caption.slice(0, MAX_CAPTION_CHARS - 1).trimEnd()}…`
+      : caption;
+  });
 }

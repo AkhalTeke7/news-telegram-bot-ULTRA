@@ -2,7 +2,7 @@ import { createApi } from './api';
 import { runNewsPipeline } from './pipeline';
 import type { Env } from './types';
 import { APP_HTML } from './ui';
-import { buildImageHtml, buildRunFrame, type ImageNewsItem } from './newsImage';
+import { buildImageHtml, buildSlideFrame, type ImageNewsItem } from './newsImage';
 
 const api = createApi();
 
@@ -36,13 +36,16 @@ export default {
         { id: 3, channelUsername: 'BBC Persian', title: 'گسترش نفوذ حوثی‌ها در آفریقا؛ ایران چه نقشی دارد؟', summary: 'این گزارش به گسترش نفوذ حوثی‌ها در آفریقا و نقش احتمالی ایران می‌پردازد.' },
         { id: 4, channelUsername: 'BBC Persian', title: 'اگر جنگ به فضا کشیده شود؛ ماهواره‌ها چگونه هدف قرار می‌گیرند؟', summary: 'گزارشی درباره آسیب‌پذیری ماهواره‌ها در صورت گسترش درگیری‌ها به فضا.' },
       ];
-      // Sample ticker lines so the preview also shows the "other headlines" strip.
+      // The preview shows exactly what a run slide looks like: the FIXED
+      // 2×2 news board (four items per slide) plus the last slide's overflow
+      // ticker strip, so the template can be inspected without a render.
       const sampleTicker = [
         { id: 101, channelUsername: 'BBC Persian', text: 'بازارهای جهانی امروز با رشد شاخص‌ها همراه بودند' },
         { id: 102, channelUsername: 'Zoomit', text: 'رونمایی از نسل جدید تراشه‌های هوش مصنوعی اعلام شد' },
         { id: 103, channelUsername: 'IRIB News', text: 'پیش‌بینی کاهش دما در استان‌های شمالی کشور' },
       ];
-      return new Response(buildImageHtml(buildRunFrame(sample, new Date(), sampleTicker)), { headers: HTML_HEADERS });
+      const frame = buildSlideFrame(sample, new Date(), 1, 3, sampleTicker);
+      return new Response(buildImageHtml(frame, 'four'), { headers: HTML_HEADERS });
     }
 
     if (url.pathname === '/favicon.ico') {

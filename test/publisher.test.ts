@@ -599,24 +599,29 @@ describe('per-run limits', () => {
     }
 
     // 18 enabled channels leave a smaller publish budget than 18 (the platform
-    // subrequest limit is shared with collection and summarization), so run one
-    // publishes the first channels in order and defers the rest explicitly.
+    // subrequest limit is shared with collection, summarization and the album
+    // reserve), so run one publishes the first channels in order and defers
+    // the rest explicitly.
     const t = telegramRecorder();
     const first = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
 
-    expect(t.sent).toHaveLength(publishMessageBudget(18));
+    expect(t.sent).toHaveLength(publishMessageBudget(18, 0));
     expect(t.sent[0].text).toContain('@many_chan_1');
     expect(first.failures.some((f) => f.category === 'run_limit')).toBe(true);
 
-    // The follow-up run drains the deferred channels in the same order.
-    const t2 = telegramRecorder();
-    await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t2.fetchImpl });
+    // Follow-up runs drain the deferred channels in the same order.
+    const delivered = [...t.sent.map((s) => s.text)];
+    for (let run = 0; run < 10; run++) {
+      const t2 = telegramRecorder();
+      const next = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t2.fetchImpl });
+      delivered.push(...t2.sent.map((s) => s.text));
+      if (next.published === 0) break;
+    }
 
     const left = await env.DB.prepare(`SELECT COUNT(*) AS n FROM messages WHERE published_at IS NULL`).first<{ n: number }>();
     expect(left?.n).toBe(0);
-    // Every channel appeared exactly once across the two runs, in order.
-    const delivered = [...t.sent, ...t2.sent].map((s) => s.text.match(/@many_chan_\d+/)?.[0]);
-    expect(delivered).toEqual(
+    // Every channel appeared exactly once across the runs, in order.
+    expect(delivered.map((text) => text.match(/@many_chan_\d+/)?.[0])).toEqual(
       Array.from({ length: 18 }, (_, i) => `@many_chan_${i + 1}`)
     );
   });
@@ -630,7 +635,7 @@ describe('per-run limits', () => {
     const t = telegramRecorder();
     const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
 
-    const budget = publishMessageBudget(1);
+    const budget = publishMessageBudget(1, 0);
     expect(t.sent.length).toBe(budget);
     expect(t.sent.length).toBeLessThanOrEqual(MAX_MESSAGES_PER_RUN);
     // The rest is recorded, not silently dropped.
@@ -665,11 +670,19 @@ describe('per-run limits', () => {
 describe('subrequest budget', () => {
   beforeEach(reset);
 
-  it('derives the budget from the Free subrequest limit and the enabled channels', () => {
+  it('derives the budget from the Free subrequest limit and the album size', () => {
     // 50 total - summarize(20) - model list(1) - collection(1 per channel)
+    // - album reserve (one Browser Run render per slide + one media group send).
+    // Default reserve (a single slide + send = 2):
     expect(publishMessageBudget(0)).toBe(27);
     expect(publishMessageBudget(5)).toBe(22);
     expect(publishMessageBudget(10)).toBe(17);
+    // No Browser Run binding => no album at all => nothing reserved:
+    expect(publishMessageBudget(0, 0)).toBe(29);
+    expect(publishMessageBudget(1, 0)).toBe(28);
+    expect(publishMessageBudget(18, 0)).toBe(11);
+    // A five-slide album reserves six (five renders + one send):
+    expect(publishMessageBudget(0, 6)).toBe(23);
     // Always at least one message, so publishing never stalls completely.
     expect(publishMessageBudget(1000)).toBe(1);
     // Never above the hard ceiling.
@@ -688,8 +701,9 @@ describe('subrequest budget', () => {
     const t = telegramRecorder();
     const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
 
-    // Budget for 5 enabled channels is 24; the run must not exceed it.
-    expect(t.sent.length).toBeLessThanOrEqual(publishMessageBudget(5));
+    // No Browser Run binding: the budget for 5 enabled channels is 24; the
+    // run must not exceed it.
+    expect(t.sent.length).toBeLessThanOrEqual(publishMessageBudget(5, 0));
     expect(report.failures.some((f) => f.category === 'run_limit')).toBe(true);
 
     // Collection + summarization + publishing now fit the 50-subrequest budget.
@@ -740,6 +754,55 @@ describe('manual processing uses the same behavior', () => {
     expectRichDigest(t.sent[0].text, ['الف', 'ب'], '@manual_a');
     expectRichDigest(t.sent[1].text, ['ج'], '@manual_b');
   });
+
+  it('the pipeline report explains WHY publishing failed (failure categories)', async () => {
+    const a = await seedChannel('pub_a');
+    await seedNews(a, 'pub_a', 1, 'خبر معتبر.');
+    // Two summarized rows whose stored source links are unusable forever:
+    // previously this failure was completely invisible in the run report.
+    for (const id of [7, 8]) {
+      await env.DB.prepare(
+        `INSERT INTO messages (source_channel_id, telegram_message_id, message_date, message_text, source_url, summary_text, summarized_at, filter_status)
+         VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'body', 'broken-link', 'خلاصه.', strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'passed')`
+      )
+        .bind(a, id)
+        .run();
+    }
+
+    const telegramCalls: string[] = [];
+    const fetchMock = vi.fn(async (url: unknown) => {
+      const href = String(url);
+      if (href.startsWith('https://t.me/')) return new Response('<html></html>'); // empty preview
+      telegramCalls.push(href);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1, date: 1 } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const outcome = await runNewsPipeline(
+        env.DB,
+        { ...envFor(), TELEGRAM_DESTINATION_CHANNEL: '@destination', TELEGRAM_BOT_TOKEN: 'T' } as Env,
+        { trigger: 'manual', log: false }
+      );
+
+      // The report now names the per-item publish failure categories.
+      expect(outcome.publishing?.failureCategories).toEqual({ invalid_source_url: 2 });
+      expect(outcome.publishing?.published).toBe(1);
+      expect(outcome.publishing?.failed).toBe(2);
+      // No browser binding: the album outcome explains itself too.
+      expect(outcome.publishing?.image).toMatchObject({ sent: false, reason: 'browser_binding_missing' });
+      // Ranking failed for a visible reason (no API key in this environment).
+      expect(outcome.ranking?.error).toBe('config_missing');
+      expect(outcome.ranking?.ranked).toBe(0);
+      // Exactly one Telegram text digest was delivered.
+      expect(telegramCalls).toHaveLength(1);
+      expect(telegramCalls[0]).toContain('/botT/sendRichMessage');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('Bale mirror', () => {
@@ -773,6 +836,7 @@ describe('Bale mirror', () => {
     const balePhotos: number[] = [];
     const telegramTexts: string[] = [];
     const telegramPhotos: number[] = [];
+    const telegramGroups: number[] = [];
     const fetchMock = vi.fn(async (url: unknown) => {
       const href = String(url);
       const ok = href.includes('tapi.bale.ai') ? baleStatus < 400 : true;
@@ -783,6 +847,13 @@ describe('Bale mirror', () => {
       if (href.includes('tapi.bale.ai') && href.includes('sendMessage')) {
         if (ok) baleTexts.push('x');
         return new Response(ok ? '{}' : 'err', { status: baleStatus });
+      }
+      if (href.includes('sendMediaGroup')) {
+        telegramGroups.push(1);
+        return new Response(
+          JSON.stringify({ ok: true, result: [{ message_id: 501 }, { message_id: 502 }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
       }
       if (href.includes('sendPhoto')) {
         telegramPhotos.push(1);
@@ -804,6 +875,7 @@ describe('Bale mirror', () => {
       balePhotos,
       telegramTexts,
       telegramPhotos,
+      telegramGroups,
     };
   }
 
@@ -844,7 +916,7 @@ describe('Bale mirror', () => {
     expect(report.bale).toEqual({ sent: 2, failed: 0 });
   });
 
-  it('mirrors the image when Browser Run is configured', async () => {
+  it('mirrors every album card when Browser Run is configured', async () => {
     await seedTwoChannels();
     const h = dualHarness();
     const browser = {
@@ -862,10 +934,16 @@ describe('Bale mirror', () => {
       bale: BALE,
     });
 
+    // Two items share one slide: a sendPhoto album on Telegram, mirrored to
+    // Bale as one photo carrying both headlines in its caption.
+    expect(h.telegramGroups).toHaveLength(0);
     expect(h.telegramPhotos).toHaveLength(1);
     expect(h.balePhotos).toHaveLength(1);
     expect(h.baleTexts).toHaveLength(2);
     expect(report.bale).toEqual({ sent: 3, failed: 0 });
+    expect(report.image?.sent).toBe(true);
+    expect(report.image?.slides).toBe(1);
+    expect(report.image?.selected).toBe(2);
   });
 
   it('a Bale failure never blocks Telegram publishing', async () => {

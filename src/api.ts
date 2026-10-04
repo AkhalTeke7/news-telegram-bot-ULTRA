@@ -321,7 +321,8 @@ export function createApi(): Hono<Bindings> {
       return c.json({
         ok: true,
         messageId: result.messageId,
-        cards: result.cards,
+        slides: result.slides,
+        items: result.items,
         ticker: result.ticker,
         bytes: result.bytes,
         ...(result.bale ? { bale: result.bale } : {}),

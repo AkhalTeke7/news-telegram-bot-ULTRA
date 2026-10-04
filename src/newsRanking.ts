@@ -33,6 +33,8 @@ export interface RankOptions extends FetchOptions {
   /** Upper bound on how many rows are sent in the single ranking request. */
   limit?: number;
   now?: number;
+  /** Injectable wait, so tests never sleep for real. */
+  sleepImpl?: (ms: number) => Promise<void>;
 }
 
 /** One ranking request per run; bounded so the prompt stays a sane size. */
@@ -112,6 +114,9 @@ export async function runImportanceRanking(
 
   let ranked: RankedItem[] | null = null;
   const excluded: string[] = [];
+  // One bounded wait for an account-wide per-minute limit; it is shared by
+  // every free model, so rotating cannot fix it.
+  let minuteWaitUsed = false;
 
   for (let attempt = 0; attempt < 3 && ranked === null; attempt++) {
     const { model } = await resolveFreeModel(db, {
@@ -137,9 +142,26 @@ export async function runImportanceRanking(
         fetchImpl: opts.fetchImpl,
         baseUrl: opts.baseUrl,
       });
+      report.error = undefined; // a retry succeeded: no failure to report
     } catch (error) {
       const category = error instanceof AiError ? error.category : 'unexpected';
       report.error = category;
+
+      // Account-wide daily cap: no free model can rank anything today.
+      if (category === 'rate_limited_daily') {
+        return report;
+      }
+
+      // Account-wide per-minute cap: wait once for the reset and retry the
+      // SAME model (attempt index unchanged), never rotate.
+      if (category === 'rate_limited_minute' && !minuteWaitUsed) {
+        minuteWaitUsed = true;
+        const wait = Math.min(error instanceof AiError ? (error.retryAfterMs ?? 20_000) : 20_000, 30_000);
+        await (opts.sleepImpl ?? ((ms: number) => new Promise((r) => setTimeout(r, ms))))(wait);
+        attempt--;
+        continue;
+      }
+
       // Rotate away from a failing model, but only among proven-free models.
       // Every provider-side failure AND every unusable answer rotates: a free
       // endpoint that replies with prose instead of a JSON array is just as

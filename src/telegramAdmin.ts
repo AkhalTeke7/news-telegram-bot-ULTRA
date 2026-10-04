@@ -403,9 +403,9 @@ async function renderChannelList(env: Env): Promise<string> {
 }
 
 /**
- * Admin-facing report for the image-only test. Success lists what the image
- * contains (cards, ticker lines, size, render time); failure repeats the safe
- * Persian reason from sendTestImage.
+ * Admin-facing report for the image-only test. Success lists what the album
+ * contains (slides, news items, overflow lines, size, render time); failure
+ * repeats the safe Persian reason from sendTestImage.
  */
 export function renderTestImageResult(result: TestImageResult): string {
   if (result.ok) {
@@ -413,9 +413,10 @@ export function renderTestImageResult(result: TestImageResult): string {
       '✅ تصویر آزمایشی به کانال مقصد ارسال شد.',
       '',
       `شناسه پیام: ${result.messageId}`,
-      `خبرهای اصلی (کارت): ${result.cards}`,
-      `سایر عناوین (نوار): ${result.ticker}`,
-      `حجم تصویر: ${Math.max(1, Math.round(result.bytes / 1024))} کیلوبایت`,
+      `اسلایدهای آلبوم: ${result.slides} (هر اسلاید ۴ خبر)`,
+      `اخبار داخل اسلایدها: ${result.items}`,
+      `سایر عناوین (سرریز): ${result.ticker}`,
+      `حجم تصاویر: ${Math.max(1, Math.round(result.bytes / 1024))} کیلوبایت`,
       `زمان رندر: ${result.browserRunMs} میلی‌ثانیه`,
       ...(result.bale ? [result.bale.sent ? 'بیل: ارسال شد ✅' : 'بیل: ناموفق ❌'] : []),
     ].join('\n');
@@ -451,11 +452,23 @@ const AI_ERROR_LABELS: Record<string, string> = {
   config_missing: 'کلید API تنظیم نشده',
   no_free_model: 'مدل رایگانی در دسترس نیست',
   rate_limited: 'محدودیت نرخ درخواست',
+  rate_limited_minute: 'محدودیت نرخ درخواست (سطح حساب، هر دقیقه)',
+  rate_limited_daily: 'محدودیت روزانهٔ درخواست رایگان (سطح حساب)',
   provider_error: 'خطای سرویس‌دهندهٔ مدل',
   invalid_response: 'پاسخ نامعتبر مدل',
   timeout: 'اتمام زمان انتظار',
   network: 'خطای شبکه',
   empty_after_filter: 'متن پس از فیلتر خالی شد',
+  ranking_failed: 'رتبه‌بندی ناموفق بود',
+};
+
+/** Safe Persian labels for the publish failure categories a run can report. */
+const PUBLISH_ERROR_LABELS: Record<string, string> = {
+  invalid_source_url: 'لینک منبع نامعتبر',
+  rate_limited: 'محدودیت نرخ تلگرام',
+  telegram_error: 'خطای تلگرام',
+  network: 'خطای شبکه',
+  run_limit: 'سقف پیام در هر اجرا',
 };
 
 const IMAGE_REASON_LABELS: Record<string, string> = {
@@ -476,10 +489,20 @@ export function renderPipelineResult(outcome: {
     model?: string | null;
     failureCategories?: Record<string, number>;
   } | null;
+  ranking?: { important: number; ranked: number; error?: string } | null;
   publishing: {
     published: number;
+    rateLimited?: boolean;
+    failureCategories?: Record<string, number>;
     bale?: { sent: number; failed: number };
-    image?: { sent: boolean; cards: number; reason?: string };
+    image?: {
+      sent: boolean;
+      slides: number;
+      items?: number;
+      ticker?: number;
+      reason?: string;
+      detail?: string;
+    };
   } | null;
   itemFailures: number;
   durationMs: number;
@@ -502,7 +525,13 @@ export function renderPipelineResult(outcome: {
         }`,
         // Why a run produced nothing used to be invisible in this report.
         ...describeAiFailures(outcome.summarization?.failureCategories),
-        `انتشار: ${outcome.publishing?.published ?? 0}`,
+        ...(outcome.ranking && outcome.ranking.error
+          ? [`رتبه‌بندی: ناموفق (${AI_ERROR_LABELS[outcome.ranking.error] ?? outcome.ranking.error})`]
+          : []),
+        `انتشار: ${outcome.publishing?.published ?? 0}${
+          outcome.publishing?.rateLimited ? ' (محدودیت نرخ تلگرام)' : ''
+        }`,
+        ...describePublishFailures(outcome.publishing?.failureCategories),
         ...describeImageOutcome(outcome.publishing?.image),
       ];
 
@@ -536,16 +565,39 @@ function describeAiFailures(categories: Record<string, number> | undefined): str
   return [`علت خطای خلاصه‌سازی: ${text}`];
 }
 
-/** One line telling the admin whether the run image reached the channel. */
+/** One line naming the publish failure categories, or nothing. */
+function describePublishFailures(categories: Record<string, number> | undefined): string[] {
+  const entries = Object.entries(categories ?? {});
+  if (entries.length === 0) return [];
+  const text = entries
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([category, count]) => `${PUBLISH_ERROR_LABELS[category] ?? category} (${count})`)
+    .join('، ');
+  return [`علت خطای انتشار: ${text}`];
+}
+
+/** One line telling the admin whether the run album reached the channel. */
 function describeImageOutcome(
-  image: { sent: boolean; cards: number; reason?: string } | undefined
+  image: {
+    sent: boolean;
+    slides: number;
+    items?: number;
+    ticker?: number;
+    reason?: string;
+    detail?: string;
+  } | undefined
 ): string[] {
   if (!image) return [];
-  if (image.sent) return [`تصویر خبری: ارسال شد (${image.cards} کارت)`];
+  if (image.sent) {
+    const itemsNote = image.items !== undefined ? `، ${image.items} خبر` : '';
+    const tickerNote = image.ticker && image.ticker > 0 ? `، ${image.ticker} عنوان دیگر` : '';
+    return [`تصویر خبری (اسلایدشو): ارسال شد (${image.slides} اسلاید${itemsNote}${tickerNote})`];
+  }
   return [
     `تصویر خبری: ارسال نشد — ${
       image.reason ? (IMAGE_REASON_LABELS[image.reason] ?? image.reason) : 'نامشخص'
-    }`,
+    }${image.detail ? ` (${image.detail})` : ''}`,
   ];
 }
 

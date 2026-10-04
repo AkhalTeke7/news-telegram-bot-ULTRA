@@ -367,6 +367,97 @@ export async function sendPhoto(opts: SendPhotoOptions): Promise<SentMessage> {
   return data.result;
 }
 
+/** One photo of an album. Captions are plain text (no parse mode). */
+export interface MediaGroupItem {
+  /** Raw PNG bytes. Sent as multipart/form-data, never written to any store. */
+  photo: ArrayBuffer;
+  /** Optional caption; Telegram allows 0-1024 characters per item. */
+  caption?: string;
+}
+
+export interface SendMediaGroupOptions extends TelegramClientOptions {
+  chatId: string;
+  /** The album: 2–10 photos, delivered by Telegram as one slideshow. */
+  media: MediaGroupItem[];
+  disableNotification?: boolean;
+  timeoutMs?: number;
+}
+
+export const SEND_MEDIA_GROUP_TIMEOUT_MS = 30_000;
+export const MEDIA_GROUP_MIN_ITEMS = 2;
+export const MEDIA_GROUP_MAX_ITEMS = 10;
+
+/**
+ * Bot API `sendMediaGroup` — the album/slideshow transport.
+ *
+ * Photos are uploaded as multipart attachments referenced by
+ * `attach://card<i>`; captions are plain text so no entity parsing can ever
+ * reject the album. Error handling mirrors `sendPhoto` exactly, so the
+ * publisher can treat an album failure like any other photo failure.
+ */
+export async function sendMediaGroup(opts: SendMediaGroupOptions): Promise<SentMessage[]> {
+  if (opts.media.length < MEDIA_GROUP_MIN_ITEMS || opts.media.length > MEDIA_GROUP_MAX_ITEMS) {
+    throw new TelegramError(
+      0,
+      `sendMediaGroup requires ${MEDIA_GROUP_MIN_ITEMS}-${MEDIA_GROUP_MAX_ITEMS} media items.`
+    );
+  }
+
+  const doFetch = opts.fetchImpl ?? fetch;
+  const base = opts.baseUrl ?? API_BASE;
+
+  const form = new FormData();
+  form.set('chat_id', opts.chatId);
+  form.set(
+    'media',
+    JSON.stringify(
+      opts.media.map((item, i) => ({
+        type: 'photo',
+        media: `attach://card${i}`,
+        ...(item.caption ? { caption: item.caption } : {}),
+      }))
+    )
+  );
+  opts.media.forEach((item, i) => {
+    // A filename is required for the file part; the name is cosmetic.
+    form.set(`card${i}`, new Blob([item.photo], { type: 'image/png' }), `news-${i}.png`);
+  });
+  if (opts.disableNotification) form.set('disable_notification', 'true');
+
+  let res: Response;
+  try {
+    res = await doFetch(`${base}/bot${opts.token}/sendMediaGroup`, {
+      method: 'POST',
+      body: form,
+      signal: AbortSignal.timeout(opts.timeoutMs ?? SEND_MEDIA_GROUP_TIMEOUT_MS),
+    });
+  } catch (e) {
+    const reason = e instanceof Error && e.name === 'TimeoutError' ? 'timed out' : message(e);
+    throw new TelegramError(0, `Telegram sendMediaGroup failed: ${reason}`);
+  }
+
+  const data = (await res.json().catch(() => null)) as
+    | { ok: boolean; result?: SentMessage[]; description?: string; parameters?: { retry_after?: number } }
+    | null;
+
+  if (res.status === 429) {
+    const retryAfter = Number(data?.parameters?.retry_after);
+    throw new TelegramRateLimitError(
+      429,
+      data?.description ?? 'Telegram rate limit reached.',
+      Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 0
+    );
+  }
+
+  if (!res.ok || !data?.ok || !Array.isArray(data.result)) {
+    throw new TelegramError(
+      res.status,
+      data?.description ?? `Telegram sendMediaGroup failed with status ${res.status}`
+    );
+  }
+  return data.result;
+}
+
 export interface EditMessageOptions extends TelegramClientOptions {
   chatId: string;
   messageId: number;

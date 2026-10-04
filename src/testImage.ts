@@ -1,16 +1,17 @@
 /**
- * Sends ONE test image — and nothing else — to the configured Telegram
+ * Sends the image TEST ALBUM — and nothing else — to the configured Telegram
  * destination.
  *
  * Purpose: let the admin exercise the FULL image path (real pending news from
- * D1 → top-4 cards + ticker → Browser Run screenshot → sendPhoto) without
- * waiting for the cron run and without touching any publish state:
+ * D1 → fixed-template slides, four news items each → Browser Run screenshots →
+ * sendMediaGroup slideshow) without waiting for the cron run and without
+ * touching any publish state:
  *
  *  - the news is REAL: exactly the rows the next run would publish
  *    (summarized, unfiltered, not yet published);
  *  - NOTHING is marked published — the next real run still publishes every
  *    row normally, the test image is purely diagnostic;
- *  - no text digests are sent — this tests ONLY the image;
+ *  - no text digests are sent — this tests ONLY the album;
  *  - when there is no pending news, nothing is rendered or sent.
  *
  * Security rules match src/testMessage.ts: the destination and token are read
@@ -18,9 +19,15 @@
  */
 
 import { baleSendPhoto } from './bale';
-import { NewsImageError, renderRunImage, type BrowserBinding } from './newsImage';
+import { readMsEnv } from './pipeline';
+import {
+  DEFAULT_IMAGE_RENDER_SPACING_MS,
+  buildAlbumCaptions,
+  renderRunAlbum,
+  type BrowserBinding,
+} from './newsImage';
 import { resolveBaleDelivery, resolveDestination, selectPublishableMessages } from './publisher';
-import { sendPhoto, TelegramError } from './telegram';
+import { sendMediaGroup, sendPhoto, TelegramError } from './telegram';
 import { describeTelegramError, type BaleTestOutcome, type TestMessageErrorCategory } from './testMessage';
 import type { Env } from './types';
 
@@ -40,9 +47,11 @@ export interface TestImageSuccess {
   ok: true;
   /** Message id Telegram assigned to the delivered test photo. */
   messageId: number;
-  /** News shown as cards (at most four). */
-  cards: number;
-  /** Headlines shown in the ticker strip below the cards. */
+  /** Slides sent in the test album (each covers four news items). */
+  slides: number;
+  /** News items carried across the slides. */
+  items: number;
+  /** Overflow headlines shown in the last slide's ticker. */
   ticker: number;
   /** PNG size in bytes. */
   bytes: number;
@@ -68,7 +77,7 @@ export interface SendTestImageOptions {
 }
 
 /**
- * Renders and sends the test image. Never throws.
+ * Renders and sends the test album. Never throws.
  */
 export async function sendTestImage(
   env: Env,
@@ -120,16 +129,24 @@ export async function sendTestImage(
     };
   }
 
-  let rendered;
+  let album;
   try {
-    rendered = await renderRunImage({ browser, items: rows, now: opts.now });
+    // The test renders the REAL album, so it paces its Browser Run calls with
+    // the very same IMAGE_RENDER_SPACING_MS setting the pipeline uses — a
+    // diagnostic that tripped the free-tier Quick Action limit would not
+    // diagnose anything. (Tests set the binding to 0 and stay fast.)
+    album = await renderRunAlbum({
+      browser,
+      items: rows,
+      now: opts.now,
+      spacingMs: readMsEnv(
+        env.IMAGE_RENDER_SPACING_MS,
+        DEFAULT_IMAGE_RENDER_SPACING_MS,
+        120_000
+      ),
+    });
   } catch (error) {
-    const reason =
-      error instanceof NewsImageError
-        ? error.message
-        : error instanceof Error
-          ? error.message
-          : String(error);
+    const reason = error instanceof Error ? error.message : String(error);
     logTestImage('error', { category: 'render_failed' });
     return {
       ok: false,
@@ -139,7 +156,7 @@ export async function sendTestImage(
   }
 
   // Every row was excluded (e.g. all scored importance 1): nothing to show.
-  if (!rendered) {
+  if (!album) {
     return {
       ok: false,
       category: 'no_news',
@@ -147,32 +164,69 @@ export async function sendTestImage(
     };
   }
 
+  // Slides were selected but none could be rendered (Browser Run down or rate
+  // limited) — the same outcome the pipeline would report as render_failed.
+  if (album.slides.length === 0) {
+    logTestImage('error', { category: 'render_failed', reason: album.error });
+    return {
+      ok: false,
+      category: 'render_failed',
+      message: `ساخت تصویر ناموفق بود: ${(album.error ?? 'نامشخص').slice(0, 120)}`,
+    };
+  }
+
+  const captions = buildAlbumCaptions(
+    album.slides.map((slide) => slide.items),
+    album.ticker,
+    album.hidden,
+    opts.now ?? new Date()
+  );
+  const bytes = album.slides.reduce((sum, slide) => sum + slide.bytes, 0);
+
   try {
-    const sent = await sendPhoto({
-      token,
-      chatId: destination,
-      photo: rendered.png,
-      // Clearly a diagnostic; subscribers should not be buzzed for it.
-      disableNotification: true,
-      fetchImpl: opts.fetchImpl,
-      baseUrl: opts.baseUrl,
-    });
+    const media = album.slides.map((slide, index) => ({
+      photo: slide.png,
+      caption: captions[index],
+    }));
+    // A media group needs at least two photos; one slide goes as sendPhoto.
+    const sent =
+      media.length >= 2
+        ? (await sendMediaGroup({
+            token,
+            chatId: destination,
+            media,
+            // Clearly a diagnostic; subscribers should not be buzzed for it.
+            disableNotification: true,
+            fetchImpl: opts.fetchImpl,
+            baseUrl: opts.baseUrl,
+          }))[0]
+        : await sendPhoto({
+            token,
+            chatId: destination,
+            photo: album.slides[0].png,
+            caption: captions[0],
+            disableNotification: true,
+            fetchImpl: opts.fetchImpl,
+            baseUrl: opts.baseUrl,
+          });
     logTestImage('ok', {
       messageId: sent.message_id,
-      cards: rendered.items.length,
-      ticker: rendered.tickerCount,
-      bytes: rendered.bytes,
+      slides: album.slides.length,
+      items: album.selected,
+      ticker: album.ticker.filter((t) => !t.more).length,
+      bytes,
     });
-    // Best-effort Bale mirror of the very same PNG, so this button also
+    // Best-effort Bale mirror of the very same PNGs, so this button also
     // verifies the Bale token + destination. Never affects the Telegram result.
-    const bale = await mirrorTestImageToBale(env, rendered.png, opts.fetchImpl);
+    const bale = await mirrorTestImageToBale(env, album.slides, captions, opts.fetchImpl);
     return {
       ok: true,
       messageId: sent.message_id,
-      cards: rendered.items.length,
-      ticker: rendered.tickerCount,
-      bytes: rendered.bytes,
-      browserRunMs: rendered.browserRunMs,
+      slides: album.slides.length,
+      items: album.selected,
+      ticker: album.ticker.filter((t) => !t.more).length,
+      bytes,
+      browserRunMs: album.browserRunMs,
       ...(bale ? { bale } : {}),
     };
   } catch (error) {
@@ -189,16 +243,25 @@ export async function sendTestImage(
   }
 }
 
-/** Mirrors the test PNG to Bale; undefined when Bale is not configured. */
+/** Mirrors every test slide to Bale; undefined when Bale is not configured. */
 async function mirrorTestImageToBale(
   env: Env,
-  png: ArrayBuffer,
+  cards: { png: ArrayBuffer }[],
+  captions: string[],
   fetchImpl?: typeof fetch
 ): Promise<BaleTestOutcome | undefined> {
   const bale = resolveBaleDelivery(env);
   if (!bale) return undefined;
   try {
-    await baleSendPhoto({ token: bale.token, chatId: bale.destination, photo: png, fetchImpl });
+    for (const [index, card] of cards.entries()) {
+      await baleSendPhoto({
+        token: bale.token,
+        chatId: bale.destination,
+        photo: card.png,
+        caption: captions[index],
+        fetchImpl,
+      });
+    }
     logTestImage('bale_ok');
     return { sent: true };
   } catch (error) {

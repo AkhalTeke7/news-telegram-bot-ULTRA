@@ -10,12 +10,13 @@
 import { filterPendingMessages } from './adFilterStage';
 import { collectAll } from './collector';
 import { deriveCronStatus, finishCronRun, startCronRun, type CronStatus } from './cronRuns';
+import { DEFAULT_IMAGE_RENDER_SPACING_MS } from './newsImage';
 import { runImportanceRanking } from './newsRanking';
 import { isCollectionOnly } from './processingMode';
 import { collectRss } from './rssCollector';
 import { resolveBaleDelivery, resolveDestination, runPublishing } from './publisher';
 import { resolveAiApiKey } from './openrouter';
-import { runSummarization } from './summarizer';
+import { DEFAULT_AI_PACE_MS, runSummarization } from './summarizer';
 import type { Env } from './types';
 
 /**
@@ -62,17 +63,35 @@ export interface PipelineOutcome {
     eligible: number;
     published: number;
     failed: number;
+    /** Safe publish-failure categories and their counts (was invisible). */
+    failureCategories: Record<string, number>;
     rateLimited: boolean;
     /** Present only when the Bale mirror is configured. */
     bale?: { sent: number; failed: number };
     /**
-     * The single run image. Absent when nothing was publishable; `sent: false`
-     * with a `reason` when it was attempted and did not reach the channel —
-     * previously this outcome was invisible in every report.
+     * The run album (slideshow). Absent when nothing was publishable;
+     * `sent: false` with a `reason` when it was attempted and did not reach
+     * the channel — previously this outcome was invisible in every report.
      */
-    image?: { sent: boolean; cards: number; ticker: number; reason?: string };
+    image?: {
+      sent: boolean;
+      /** Slide images in the album (each covers four news items). */
+      slides: number;
+      /** News items carried across the slides. */
+      items: number;
+      ticker: number;
+      reason?: string;
+      detail?: string;
+    };
   } | null;
   durationMs: number;
+}
+
+/** Reads a non-negative millisecond tuning value from the environment. */
+export function readMsEnv(raw: string | undefined, fallback: number, max: number): number {
+  const parsed = Number.parseInt((raw ?? '').trim(), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return Math.min(parsed, max);
 }
 
 export async function runNewsPipeline(
@@ -131,10 +150,22 @@ export async function runNewsPipeline(
   let publishing: Awaited<ReturnType<typeof runPublishing>> | null = null;
 
   if (!collectionOnly) {
+    // Free-tier pacing, so one run stays under OpenRouter's account-wide
+    // ~20 requests/minute cap (AI_REQUEST_PACE_MS, default 3.2s).
+    const paceMs = readMsEnv(env.AI_REQUEST_PACE_MS, DEFAULT_AI_PACE_MS, 60_000);
+    // Spacing between two album card renders, so the run stays under the
+    // Browser Run free-tier ~1 Quick Action / 10s limit
+    // (IMAGE_RENDER_SPACING_MS, default 10.5s).
+    const renderSpacingMs = readMsEnv(
+      env.IMAGE_RENDER_SPACING_MS,
+      DEFAULT_IMAGE_RENDER_SPACING_MS,
+      120_000
+    );
+
     // Local, offline filter. Runs before any OpenRouter request is made.
     filter = await stage('filter', () => filterPendingMessages(db));
     summarization = await stage('summarize', () =>
-      runSummarization(db, { apiKey: resolveAiApiKey(env) })
+      runSummarization(db, { apiKey: resolveAiApiKey(env), paceMs })
     );
     // Global importance ranking across every channel, once per run. Never throws:
     // a failure leaves importance untouched and publishing continues.
@@ -145,8 +176,9 @@ export async function runNewsPipeline(
       runPublishing(db, {
         token: env.TELEGRAM_BOT_TOKEN,
         destination: resolveDestination(env) ?? undefined,
-        // Optional: skips the single run image when the binding is not configured.
+        // Optional: skips the run album when the binding is not configured.
         browser: env.BROWSER,
+        renderSpacingMs,
         // Optional best-effort Bale mirror of the Telegram output.
         bale: resolveBaleDelivery(env) ?? undefined,
       })
@@ -194,6 +226,7 @@ export async function runNewsPipeline(
       eligible: publishing.eligible,
       published: publishing.published,
       failed: publishing.failures.length,
+      failureCategories: countFailureCategories(publishing.failures.map((f) => f.category)),
       rateLimited: publishing.rateLimited,
       bale: publishing.bale,
       image: describeImage(publishing, env),
@@ -251,32 +284,60 @@ export async function runNewsPipeline(
 }
 
 /**
- * Flattens the publisher's image outcome into a report-friendly shape, and
+ * Flattens the publisher's album outcome into a report-friendly shape, and
  * explains the two silent cases: no Browser Run binding configured, and a
- * render/send failure. Returns undefined when no image was expected at all.
+ * render/send failure. Returns undefined when no album was expected at all.
  */
 function describeImage(
-  publishing: { eligible: number; image?: { sent: boolean; selected: number; channels: number; error?: string } },
+  publishing: {
+    eligible: number;
+    image?: {
+      sent: boolean;
+      slides: number;
+      selected: number;
+      ticker: number;
+      error?: string;
+      detail?: string;
+    };
+  },
   env: Env
-): { sent: boolean; cards: number; ticker: number; reason?: string } | undefined {
+): {
+  sent: boolean;
+  slides: number;
+  items: number;
+  ticker: number;
+  reason?: string;
+  detail?: string;
+} | undefined {
   if (publishing.image) {
-    const { sent, selected, error } = publishing.image;
+    const { sent, slides, selected, ticker, error, detail } = publishing.image;
     return {
       sent,
-      cards: selected,
-      ticker: 0,
-      ...(error ? { reason: error } : {}),
+      slides,
+      items: selected,
+      ticker,
+      ...(error ? { reason: error, ...(detail ? { detail } : {}) } : {}),
     };
   }
   if (publishing.eligible > 0) {
     return {
       sent: false,
-      cards: 0,
+      slides: 0,
+      items: 0,
       ticker: 0,
       reason: env.BROWSER ? 'no_suitable_items' : 'browser_binding_missing',
     };
   }
   return undefined;
+}
+
+/** Aggregates per-item failure categories, so reports can say WHY items failed. */
+function countFailureCategories(categories: string[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const category of categories) {
+    counts[category] = (counts[category] ?? 0) + 1;
+  }
+  return counts;
 }
 
 function message(error: unknown): string {
