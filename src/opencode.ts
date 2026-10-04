@@ -197,13 +197,18 @@ const SYSTEM_PROMPT = [
   'تو خبرنگار فارسی هستی و متن ورودی را به یک خبر پردازش‌شده تبدیل می‌کنی.',
   '',
   'خروجی تو فقط و فقط یک شیء JSON معتبر است، بدون Markdown و بدون ``` و بدون هیچ توضیح بیرونی:',
-  '{"title": "...", "summary": "...", "is_news": true, "is_advertisement": false}',
+  '{"title": "...", "summary": "...", "highlights": ["..."], "confidence": 0.9, "category": "general", "is_news": true, "is_advertisement": false}',
   '',
   'title (عنوان خبر):',
   '• یک تیتر کوتاه و طبیعی فارسی، ترجیحاً یک خط، حداکثر حدود ۹۰ نویسه.',
   '• عنوان باید از محتوای واقعی همین متن بیرون بیاید، نه از حدس یا کلیشه.',
   '• عنوان هرگز نباید این‌ها را داشته باشد: نشانی اینترنتی (http، https، www، دامنه، لینک کوتاه، t.me، telegram.me، eitaa و هر دامنهٔ دیگر)، نام یا یوزرنیم کانال، شناسهٔ پیام، نام شبکه‌های اجتماعی، عبارت «منبع:»، اعداد و شناسهٔ فنی، یا هر فرادانهٔ انتشار.',
   '• اگر متن واقعاً عنوانی ندارد، یک تیتر کوتاه و گویا از همان محتوا بنویس؛ هرگز متنی خارج از دادهٔ ورودی نساز.',
+  '',
+  'highlights (کلمات کلیدی):',
+  '• حداکثر سه عبارت کوتاه و دقیق از متن که برای برجسته‌سازی مناسب‌اند؛ خروجی آرایهٔ رشته‌ای باشد.',
+  'confidence (اطمینان): عددی بین ۰ و ۱ بر اساس صراحت و اعتبار متن، نه اهمیت خبر.',
+  'category: یکی از general, politics, economy, technology, society, culture, sports, world.',
   '',
   'summary (خلاصهٔ خبر):',
   '• فقط واقعیت‌های موجود در متن را بیاور؛ هیچ چیزی از خودت نساز و هیچ دلخواهی اضافه نکن.',
@@ -247,6 +252,9 @@ export interface SummaryResult {
   isNews: boolean;
   /** Semantic advertisement judgement by the model. */
   isAdvertisement: boolean;
+  highlights: string[];
+  confidence: number;
+  category: string;
   model: string;
 }
 
@@ -279,6 +287,9 @@ export async function summarizeNews(opts: SummarizeOptions): Promise<SummaryResu
     summary,
     isNews: parsed.isNews,
     isAdvertisement: parsed.isAdvertisement,
+    highlights: parsed.highlights,
+    confidence: parsed.confidence,
+    category: parsed.category,
     model: opts.model,
   };
 }
@@ -288,6 +299,9 @@ interface NewsJson {
   summary: string;
   isNews: boolean;
   isAdvertisement: boolean;
+  highlights: string[];
+  confidence: number;
+  category: string;
 }
 
 /** Extracts the JSON object from a model reply, tolerating code fences. */
@@ -323,6 +337,13 @@ export function parseNewsJson(content: string): NewsJson {
     // Fail closed: without an explicit verdict the item is not treated as news.
     isNews: record.is_news === true,
     isAdvertisement: record.is_advertisement === true,
+    highlights: Array.isArray(record.highlights)
+      ? record.highlights.filter((v): v is string => typeof v === 'string').map(v => v.trim()).filter(Boolean).slice(0, 3)
+      : [],
+    confidence: Math.min(1, Math.max(0, Number.isFinite(Number(record.confidence)) ? Number(record.confidence) : 0.5)),
+    category: typeof record.category === 'string' && /^(general|politics|economy|technology|society|culture|sports|world)$/.test(record.category)
+      ? record.category
+      : 'general',
   };
 }
 

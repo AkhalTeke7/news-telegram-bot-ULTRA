@@ -152,7 +152,8 @@ export async function markSummarized(
   messageId: number,
   summary: string,
   model: string,
-  title?: string | null
+  title?: string | null,
+  metadata: { highlights: string[]; confidence: number; category: string } = { highlights: [], confidence: 0.5, category: 'general' }
 ): Promise<boolean> {
   const result = await db
     .prepare(
@@ -160,10 +161,14 @@ export async function markSummarized(
           SET summary_text = ?1,
               summary_model = ?2,
               title = ?4,
+              highlights_json = ?5,
+              confidence = ?6,
+              category = ?7,
+              ai_processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
               summarized_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         WHERE id = ?3 AND summarized_at IS NULL`
     )
-    .bind(summary, model, messageId, title && title.trim() ? title.trim() : null)
+    .bind(summary, model, messageId, title && title.trim() ? title.trim() : null, JSON.stringify(metadata.highlights.slice(0, 3)), metadata.confidence, metadata.category)
     .run();
 
   return (result.meta.changes ?? 0) > 0;
@@ -250,7 +255,7 @@ export async function runSummarization(
         continue;
       }
 
-      const { title, summary, isNews, isAdvertisement, model: usedModel } = await summarizeNews({
+      const { title, summary, isNews, isAdvertisement, highlights, confidence, category, model: usedModel } = await summarizeNews({
         apiKey,
         model: currentModel,
         text: newsBody,
@@ -281,7 +286,7 @@ export async function runSummarization(
       // Deterministic title gate. An invalid headline is simply not stored; the
       // news still publishes from its summary.
       const safeTitle = validateAiTitle(title);
-      const persisted = await markSummarized(db, message.id, summary, usedModel, safeTitle);
+      const persisted = await markSummarized(db, message.id, summary, usedModel, safeTitle, { highlights, confidence, category });
       if (!persisted) {
         // Already summarized by a concurrent run; nothing to do.
         continue;
