@@ -15,6 +15,7 @@ import {
 import { resolveDestination } from './publisher';
 import { addSourceChannel } from './sourceChannels';
 import { getChannelStats, getStatusReport } from './status';
+import { sendTestMessage } from './testMessage';
 import { handleWebhook, type WaitUntilCtx } from './telegramAdmin';
 import { isProductionHost, registerTelegramWebhook } from './telegramSetup';
 import type { Env } from './types';
@@ -175,6 +176,28 @@ export function createApi(): Hono<Bindings> {
     }
     const outcome = await registerTelegramWebhook(c.env);
     return c.json(outcome.body, outcome.status as 200);
+  });
+
+  // Sends one clearly-marked test message to the configured destination so the
+  // admin can verify token + destination + channel admin rights without a cron
+  // run. Authenticated by the admin session; the response never contains the
+  // destination value or the token.
+  app.post('/api/telegram/test-message', async (c) => {
+    const result = await sendTestMessage(c.env);
+    if (result.ok) {
+      return c.json({ ok: true, messageId: result.messageId });
+    }
+    switch (result.category) {
+      case 'destination_not_configured':
+      case 'invalid_destination':
+      case 'token_missing':
+        // Server-side configuration problem, not a Telegram failure.
+        return fail(c, 503, result.message);
+      case 'rate_limited':
+        return fail(c, 429, result.message);
+      default:
+        return fail(c, 502, result.message);
+    }
   });
 
   app.delete('/api/channels/:id', async (c) => {

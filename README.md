@@ -239,10 +239,27 @@ and read `message.from.id` from the update JSON. The value must be digits only.
 ### Bot commands and buttons
 
 `/start` shows the menu: add channel, list channels, system status, AI model status, last
-run, manual processing, cancel. Channel deletion and manual processing both require an
-explicit confirmation button, and a pending confirmation expires after 10 minutes
-(`telegram_admin_state` in D1 — Workers are stateless, so pending actions live in the
-database and expire automatically).
+run, manual processing, test message, cancel. Channel deletion and manual processing both
+require an explicit confirmation button, and a pending confirmation expires after 10
+minutes (`telegram_admin_state` in D1 — Workers are stateless, so pending actions live in
+the database and expire automatically).
+
+### Test message
+
+`/test` (or the `🧪 پیام آزمایشی` menu button, or the same button in the web admin panel)
+sends one clearly-marked test message to the configured destination channel and reports
+the outcome. It verifies the exact publish path — `TELEGRAM_BOT_TOKEN`,
+`TELEGRAM_DESTINATION_CHANNEL`, and the bot's admin rights in the destination channel —
+without waiting for the hourly cron and without needing fresh news in the window.
+
+The shared implementation is `sendTestMessage()` in `src/testMessage.ts`; the Telegram
+admin interface and the authenticated `POST /api/telegram/test-message` endpoint both call
+it. It never throws: every failure comes back as a safe Persian reason with a stable
+category (`destination_not_configured`, `invalid_destination`, `token_missing`,
+`rate_limited`, `network`, `telegram_error`). Telegram's own rejection description (e.g.
+`Bad Request: chat not found`) is shown to the admin because it is the fastest way to spot
+a bot that is not an administrator of the destination channel; the token and the
+destination value are never echoed, logged, or written to the database.
 
 ### Manual processing
 
@@ -387,6 +404,7 @@ another CI pipeline, make sure the build command installs dependencies
 | PATCH | `/api/channels/:id` | `{enabled: boolean}` |
 | DELETE | `/api/channels/:id` | 204 |
 | GET | `/api/status` | counts, timestamps, error categories (no secrets) |
+| POST | `/api/telegram/test-message` | sends a test message to the destination; `{messageId}` on success, 503/502/429 with a Persian reason otherwise (no secrets) |
 
 Write endpoints require `content-type: application/json` and the session cookie
 (`HttpOnly`, `Secure`, `SameSite=Strict`), which blocks CSRF.

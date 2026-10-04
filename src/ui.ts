@@ -84,7 +84,10 @@ export const APP_HTML = `<!DOCTYPE html>
       <div class="stats" id="statusBox">
         <div class="stat"><span class="k">در حال بارگذاری…</span></div>
       </div>
-      <div class="row"><button id="refreshStatus">به‌روزرسانی وضعیت</button></div>
+      <div class="row">
+        <button id="refreshStatus">به‌روزرسانی وضعیت</button>
+        <button id="testMessageBtn">🧪 ارسال پیام آزمایشی</button>
+      </div>
       <div id="statusMsg" class="msg"></div>
     </section>
 
@@ -325,6 +328,21 @@ $('refreshStatus').onclick = async () => {
   const btn = $('refreshStatus');
   btn.disabled = true;
   await loadStatus();
+  btn.disabled = false;
+};
+
+// Sends one test message to the configured destination channel and reports
+// the server's verdict; the server never reveals the destination itself.
+$('testMessageBtn').onclick = async () => {
+  const btn = $('testMessageBtn');
+  btn.disabled = true;
+  setMsg($('statusMsg'), 'در حال ارسال پیام آزمایشی…', null);
+  try {
+    await api('/api/telegram/test-message', { method: 'POST', body: '{}' });
+    setMsg($('statusMsg'), '✅ پیام آزمایشی به کانال مقصد ارسال شد.', 'ok');
+  } catch (e) {
+    setMsg($('statusMsg'), e.message, 'err');
+  }
   btn.disabled = false;
 };
 
