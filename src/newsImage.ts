@@ -127,7 +127,13 @@ export function selectTopNews(
   items: readonly PublishableMessage[],
   limit = MAX_IMAGE_ITEMS
 ): ImageNewsItem[] {
-  const usable = items.filter((i) => i.summaryText.trim().length > 0);
+  // An explicit AI score of 1 means "not worth publishing". Keep NULL rows
+  // as a backwards-compatible fallback for messages created before the
+  // importance migration; a failed ranking run must not make those rows vanish
+  // from the normal publishing path.
+  const usable = items.filter(
+    (i) => i.summaryText.trim().length > 0 && i.importance !== 1
+  );
   if (usable.length === 0 || limit <= 0) return [];
 
   const ranked = [...usable].sort((a, b) => {

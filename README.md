@@ -12,8 +12,10 @@ No paid models, no MTProto, no external services, no OpenRouter.
 Cron (hourly, at :00 Tehran time)
   └─ collect   → GET https://t.me/s/<username>   → D1 `messages`   (1-hour window, deduped)
   └─ filter    → local advertisement filter      → filter_status    (no AI, no network)
-  └─ summarize → POST https://opencode.ai/zen/v1/chat/completions → summary_text
-  └─ publish   → POST https://api.telegram.org/bot<token>/sendMessage
+  └─ summarize → POST https://opencode.ai/zen/v1/chat/completions → summary_text + title
+  └─ rank      → one global AI comparison        → importance (1–5)
+  └─ publish   → Browser Run HTML screenshot + Telegram sendPhoto (important news)
+             └─ text digest → Telegram sendMessage
 ```
 
 Each stage is isolated: one failing channel, message, or model never stops the rest.
@@ -56,6 +58,7 @@ Migrations, in order:
 | `0005_cron_runs.sql` | hourly-run outcome columns, `last_publish_error_at` |
 | `0006_telegram_admin.sql` | `telegram_admin_state` (short-lived D1 conversation state) |
 | `0007_ad_filter.sql` | `messages.filter_status` / `filter_reason` / `filtered_at`, `cron_runs.messages_filtered` |
+| `0008_title_importance.sql` | AI `title` and global `importance` (1–5) for ranking/image selection |
 
 ## 2. Telegram bot setup
 
@@ -133,6 +136,21 @@ delivered exactly once).
 Items are marked `published_at` (with `telegram_destination_message_id`) only after Telegram
 confirms each delivered message, so a failed or rate-limited part is retried next run
 without duplicating what already went out.
+
+## AI importance and channel image
+
+After summaries are created, one global OpenCode ranking request compares eligible news
+across all enabled source channels and stores an `importance` score from 1 to 5. Score 1
+means the item is not important enough for the visual; scores 2–5 are eligible. The
+ranking is persisted in D1, so image selection is deterministic and independent of
+channel order. Legacy rows with a null score remain eligible as a migration fallback.
+
+When `BROWSER` is configured, publishing makes one Cloudflare Browser Run screenshot
+request per pipeline run. The Worker builds a Persian RTL HTML/CSS frame with the top
+four eligible items, titles, summaries, source labels, and Tehran date/time. Browser Run
+rasterizes it at 1920×1080; the PNG is immediately sent to the destination with
+Telegram `sendPhoto` and is not stored in D1 or R2. Image failure is isolated, so the
+ordinary per-channel text digests still publish.
 
 ## Advertisement filter
 
