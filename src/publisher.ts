@@ -73,12 +73,42 @@ const MAX_TITLE_CHARS = 200;
 /** Only original public-channel post links are ever published. */
 const SOURCE_URL_RE = /^https:\/\/t\.me\/[A-Za-z][A-Za-z0-9_]{4,31}\/\d{1,20}$/;
 
+/** Source kind of a channel row, mirroring `channels.source_type`. */
+export type SourceType = 'telegram' | 'rss';
+
+/**
+ * RSS article link: a well-formed absolute https URL with a real hostname.
+ * RSS rows store the article URL (bbc.com, zoomit.ir, …), never a t.me link —
+ * without this rule every RSS summary failed publishing forever as
+ * `invalid_source_url`, which also emptied the run image and the Bale mirror.
+ */
+export function isValidArticleUrl(raw: string): boolean {
+  if (!raw || raw.length > 2048) return false;
+  if (/[\s\u0000-\u001F\u007F]/.test(raw)) return false;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  return url.protocol === 'https:' && url.hostname.includes('.');
+}
+
+/** Per-source-type gate deciding whether a stored source link is publishable. */
+export function isUsableSourceUrl(item: { sourceUrl: string; sourceType: SourceType }): boolean {
+  return item.sourceType === 'rss'
+    ? isValidArticleUrl(item.sourceUrl)
+    : SOURCE_URL_RE.test(item.sourceUrl);
+}
+
 export interface PublishableMessage {
   id: number;
   channelId: number;
   channelUsername: string;
   /** Used only as a display fallback when a username is missing. */
   channelTitle: string | null;
+  /** 'telegram' for public channels, 'rss' for feed-backed channels. */
+  sourceType: SourceType;
   telegramMessageId: number;
   summaryText: string;
   /** AI headline. NULL for rows summarized before migration 0008. */
@@ -203,7 +233,7 @@ export function resolveBaleDelivery(env: Env): BaleDeliveryOptions | null {
 export async function selectPublishableMessages(db: D1Database): Promise<PublishableMessage[]> {
   const { results } = await db
     .prepare(
-      `SELECT m.id, m.source_channel_id, c.channel_username, c.channel_title, m.telegram_message_id,
+      `SELECT m.id, m.source_channel_id, c.channel_username, c.channel_title, c.source_type, m.telegram_message_id,
               m.summary_text, m.title, m.importance, m.message_date, m.source_url
          FROM messages m
          JOIN channels c ON c.id = m.source_channel_id
@@ -220,6 +250,7 @@ export async function selectPublishableMessages(db: D1Database): Promise<Publish
       source_channel_id: number;
       channel_username: string;
       channel_title: string | null;
+      source_type: string | null;
       telegram_message_id: number;
       summary_text: string;
       title: string | null;
@@ -233,6 +264,7 @@ export async function selectPublishableMessages(db: D1Database): Promise<Publish
     channelId: r.source_channel_id,
     channelUsername: r.channel_username,
     channelTitle: r.channel_title ?? null,
+    sourceType: (r.source_type === 'rss' ? 'rss' : 'telegram') as SourceType,
     telegramMessageId: r.telegram_message_id,
     summaryText: r.summary_text,
     title: r.title ?? null,
@@ -247,6 +279,7 @@ export interface ChannelGroup {
   channelId: number;
   channelUsername: string;
   channelTitle: string | null;
+  sourceType: SourceType;
   items: PublishableMessage[];
 }
 
@@ -264,6 +297,7 @@ export function groupByChannel(items: PublishableMessage[]): ChannelGroup[] {
         channelId: item.channelId,
         channelUsername: item.channelUsername,
         channelTitle: item.channelTitle ?? null,
+        sourceType: item.sourceType ?? 'telegram',
         items: [item],
       });
     }
@@ -279,13 +313,28 @@ export interface DigestPart {
 
 /**
  * Display identifier for a channel: its username, else its configured title.
+ * RSS channels prefer the configured feed title (e.g. «بی‌بی‌سی فارسی») over the
+ * synthetic internal username (`rss_3`).
  * Never invents a name; an empty result makes the digest skip sending.
  */
 export function channelDisplayName(item: {
   channelUsername: string;
   channelTitle?: string | null;
+  sourceType?: SourceType;
 }): string {
-  return item.channelUsername.trim() || (item.channelTitle ?? '').trim();
+  const username = item.channelUsername.trim();
+  const title = (item.channelTitle ?? '').trim();
+  if (item.sourceType === 'rss') return title || username;
+  return username || title;
+}
+
+/**
+ * Footer/label form of a source name: `@username` for real Telegram usernames,
+ * the display title verbatim for everything else (RSS feed names are Persian
+ * text and must not get a bogus `@`).
+ */
+export function sourceLabel(name: string): string {
+  return /^[A-Za-z][A-Za-z0-9_]*$/.test(name) ? `@${name}` : name;
 }
 
 /**
@@ -332,7 +381,7 @@ export function buildChannelDigest(
   if (!name) return [];
 
   const SEP = '\n\n';
-  const footer = `منبع: @${name}${destination ? `\n${destination}` : ''}`;
+  const footer = `منبع: ${sourceLabel(name)}${destination ? `\n${destination}` : ''}`;
   const overhead = SEP.length + footer.length;
   const maxSummaryLength = Math.max(1, TELEGRAM_TEXT_LIMIT - overhead);
 
@@ -471,8 +520,9 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
 
   // Phase 4 guarantee: a row whose stored source link is unusable is never
   // published. The link itself is no longer printed, but the check stands.
-  const usable = items.filter((i) => SOURCE_URL_RE.test(i.sourceUrl));
-  for (const invalid of items.filter((i) => !SOURCE_URL_RE.test(i.sourceUrl))) {
+  // Telegram rows must carry a t.me post link; RSS rows carry the article URL.
+  const usable = items.filter((i) => isUsableSourceUrl(i));
+  for (const invalid of items.filter((i) => !isUsableSourceUrl(i))) {
     await recordPublishFailure(db, invalid.id, 'invalid_source_url');
     report.failures.push({ messageId: invalid.id, category: 'invalid_source_url' });
   }
@@ -488,7 +538,11 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
   // BEFORE any text digest. Deliberately outside the per-channel loop below, so
   // Browser Run can be called at most once per pipeline run.
   const image = await publishRunImage({
-    items: usable,
+    // RSS rows swap the synthetic `rss_N` username for the feed's display
+    // title, so the image cards and footer show «بی‌بی‌سی فارسی», not @rss_3.
+    items: usable.map((i) =>
+      i.sourceType === 'rss' ? { ...i, channelUsername: channelDisplayName(i) } : i
+    ),
     destination,
     token: opts.token,
     browser: opts.browser,

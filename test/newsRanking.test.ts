@@ -135,6 +135,48 @@ describe('AI news contract', () => {
   it('rejects malformed JSON', () => {
     expect(() => parseNewsJson('not json at all')).toThrow();
   });
+
+  it('repairs a reply truncated inside the summary and keeps whole sentences', () => {
+    // Exactly what a free model emits when it hits the token cap mid-reply.
+    const truncated =
+      '{"title":"تیتر خبر","is_news":true,"is_advertisement":false,"category":"politics","confidence":0.9,"summary":"جملهٔ اول کامل است. جملهٔ دوم ناتمام';
+    const parsed = parseNewsJson(truncated);
+    expect(parsed.isNews).toBe(true);
+    expect(parsed.title).toBe('تیتر خبر');
+    // The half sentence never reaches a digest.
+    expect(parsed.summary).toBe('جملهٔ اول کامل است.');
+    expect(parsed.category).toBe('politics');
+  });
+
+  it('repairs a reply truncated inside the highlights array', () => {
+    const truncated =
+      '{"title":"ت","is_news":true,"is_advertisement":false,"category":"general","confidence":0.8,"summary":"خلاصهٔ کامل.","highlights":["اول","دو';
+    const parsed = parseNewsJson(truncated);
+    expect(parsed.summary).toBe('خلاصهٔ کامل.');
+    expect(parsed.isNews).toBe(true);
+    expect(parsed.highlights[0]).toBe('اول');
+  });
+
+  it('repairs a reply truncated at a dangling key', () => {
+    const truncated = '{"title":"ت","is_news":true,"summary":"خلاصهٔ کامل.","high';
+    const parsed = parseNewsJson(truncated);
+    expect(parsed.summary).toBe('خلاصهٔ کامل.');
+    expect(parsed.isNews).toBe(true);
+  });
+
+  it('never trusts a truncated reply that lost the verdict', () => {
+    // Without an explicit is_news boolean, repair must fail instead of
+    // parking real news as "not news".
+    expect(() => parseNewsJson('{"title":"ت","summary":"جملهٔ کامل. نیمه')).toThrow(
+      /verdict|malformed|JSON/i
+    );
+  });
+
+  it('never trusts a truncated reply without one complete sentence', () => {
+    expect(() =>
+      parseNewsJson('{"title":"ت","is_news":true,"summary":"جملهٔ ناتمام بدون پایان')
+    ).toThrow();
+  });
 });
 
 describe('AI advertisement and non-news rejection', () => {

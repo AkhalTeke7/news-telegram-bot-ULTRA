@@ -233,8 +233,8 @@ export async function discoverFreeModels(opts: FetchOptions = {}): Promise<Model
 const SYSTEM_PROMPT = [
   'تو خبرنگار فارسی هستی و متن ورودی را به یک خبر پردازش‌شده تبدیل می‌کنی.',
   '',
-  'خروجی تو فقط و فقط یک شیء JSON معتبر است، بدون Markdown و بدون ``` و بدون هیچ توضیح بیرونی:',
-  '{"title": "...", "summary": "...", "highlights": ["..."], "confidence": 0.9, "category": "general", "is_news": true, "is_advertisement": false}',
+  'خروجی تو فقط و فقط یک شیء JSON معتبر است، بدون Markdown و بدون ``` و بدون هیچ توضیح بیرونی، دقیقاً با همین ترتیب کلیدها:',
+  '{"title": "...", "is_news": true, "is_advertisement": false, "category": "general", "confidence": 0.9, "summary": "...", "highlights": ["..."]}',
   '',
   'title (عنوان خبر):',
   '• یک تیتر کوتاه و طبیعی فارسی، ترجیحاً یک خط، حداکثر حدود ۹۰ نویسه.',
@@ -310,7 +310,10 @@ export async function summarizeNews(opts: SummarizeOptions): Promise<SummaryResu
     throw new AiError('no_free_model', 'No free model selected.');
   }
 
-  const content = await complete(opts, SYSTEM_PROMPT, buildUserContent(opts), 400);
+  // 400 tokens used to truncate many free models mid-JSON (Persian text is
+  // token-heavy), producing a run full of invalid_response failures. 900 gives
+  // the full contract (title + verdict + summary + highlights) room to finish.
+  const content = await complete(opts, SYSTEM_PROMPT, buildUserContent(opts), 900);
   const parsed = parseNewsJson(content);
 
   const summary = sanitizeSummary(parsed.summary);
@@ -341,30 +344,58 @@ interface NewsJson {
   category: string;
 }
 
-/** Extracts the JSON object from a model reply, tolerating code fences. */
+/**
+ * Extracts the JSON object from a model reply, tolerating code fences and —
+ * because free models regularly hit the token cap mid-reply — truncated JSON.
+ *
+ * A truncated reply is only accepted when the repair recovers BOTH the model's
+ * explicit `is_news` verdict and at least one complete summary sentence;
+ * anything less keeps throwing `invalid_response`, so a cut-off reply can never
+ * park real news as "not news" or publish half a sentence.
+ */
 export function parseNewsJson(content: string): NewsJson {
   const cleaned = content
     .replace(/```json/gi, '')
     .replace(/```/g, '')
     .trim();
   const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start === -1 || end <= start) {
+  if (start === -1) {
     throw new AiError('invalid_response', 'Provider response contained no JSON object.');
   }
+  const end = cleaned.lastIndexOf('}');
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(cleaned.slice(start, end + 1));
-  } catch {
+  let record: Record<string, unknown> | null = null;
+  let repaired = false;
+  if (end > start) {
+    try {
+      const parsed: unknown = JSON.parse(cleaned.slice(start, end + 1));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        record = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // fall through to the truncation repair below
+    }
+  }
+  if (!record) {
+    const fixed = repairTruncatedJson(cleaned.slice(start));
+    if (fixed && typeof fixed === 'object' && !Array.isArray(fixed)) {
+      record = fixed as Record<string, unknown>;
+      repaired = true;
+    }
+  }
+  if (!record) {
     throw new AiError('invalid_response', 'Provider returned malformed JSON.');
   }
-  if (!parsed || typeof parsed !== 'object') {
-    throw new AiError('invalid_response', 'Provider returned a non-object JSON value.');
+
+  // A repaired reply is only trusted with the model's explicit verdict; the
+  // fail-closed default below would otherwise reject real news permanently.
+  if (repaired && typeof record.is_news !== 'boolean') {
+    throw new AiError('invalid_response', 'Truncated provider JSON lost the news verdict.');
   }
 
-  const record = parsed as Record<string, unknown>;
-  const summary = typeof record.summary === 'string' ? record.summary : '';
+  let summary = typeof record.summary === 'string' ? record.summary : '';
+  // A repaired summary may have been cut mid-sentence; keep whole sentences.
+  if (repaired) summary = trimToCompleteSentences(summary);
   if (!summary.trim()) {
     throw new AiError('invalid_response', 'Provider JSON had no summary.');
   }
@@ -382,6 +413,95 @@ export function parseNewsJson(content: string): NewsJson {
       ? record.category
       : 'general',
   };
+}
+
+/**
+ * Best-effort completion of a JSON object truncated by a token cap.
+ *
+ * Strategy: close an unterminated string, drop a dangling comma/key/`:` and
+ * append the missing closers; when that still does not parse, cut back to the
+ * previous structural boundary (`,`, `{`, `[`) and try again, a bounded number
+ * of times. Returns the parsed value, or null when nothing parses.
+ */
+export function repairTruncatedJson(fragment: string): unknown | null {
+  let prefix = fragment.trimEnd();
+  for (let attempt = 0; attempt < 8 && prefix.length > 1; attempt++) {
+    const candidate = completeJson(prefix);
+    if (candidate !== null) {
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        // cut further back below
+      }
+    }
+    const cut = lastStructuralBoundary(prefix);
+    if (cut <= 0 || cut >= prefix.length) return null;
+    prefix = prefix.slice(0, cut).trimEnd();
+  }
+  return null;
+}
+
+/** Closes strings/brackets of a JSON prefix; null when the prefix is invalid. */
+function completeJson(prefix: string): string | null {
+  let inString = false;
+  let escaped = false;
+  const closers: string[] = [];
+  for (const ch of prefix) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') closers.push('}');
+    else if (ch === '[') closers.push(']');
+    else if (ch === '}' || ch === ']') {
+      if (closers.pop() !== ch) return null;
+    }
+  }
+
+  let s = prefix;
+  if (escaped) s = s.slice(0, -1); // dangling backslash inside a string
+  if (inString) s += '"';
+  s = s.replace(/[,\s]+$/, '');
+  if (/:$/.test(s)) s += 'null';
+  // A bare trailing key (`..., "summ"`) has no value; drop it with its comma.
+  s = s.replace(/,\s*"(?:[^"\\]|\\.)*"$/, '');
+  return s + closers.reverse().join('');
+}
+
+/** Index of the last `,`/`{`/`[` outside strings — the safe cut-back point. */
+function lastStructuralBoundary(prefix: string): number {
+  let inString = false;
+  let escaped = false;
+  let cut = -1;
+  for (let i = 0; i < prefix.length; i++) {
+    const ch = prefix[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === ',') cut = i; // drop the comma itself
+    else if (ch === '{' || ch === '[') cut = i + 1; // keep the opener
+  }
+  return cut;
+}
+
+/**
+ * Keeps only complete sentences of a possibly mid-sentence truncated summary.
+ * Returns '' when not even one finished sentence survives, which the caller
+ * turns into a normal `invalid_response` failure.
+ */
+export function trimToCompleteSentences(text: string): string {
+  const t = text.trim();
+  if (!t) return '';
+  if (/[.!?؟…»"')\]]$/.test(t)) return t;
+  const m = t.match(/^[\s\S]*[.!?؟…]/);
+  return m ? m[0].trim() : '';
 }
 
 /**

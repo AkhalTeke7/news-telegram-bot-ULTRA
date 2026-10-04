@@ -325,6 +325,24 @@ describe('image html', () => {
     expect(html).toContain('linear-gradient');
   });
 
+  it('carries the brand signature in the footer corner', () => {
+    const frame = buildRunFrame(
+      [{ id: 1, channelUsername: 'c', title: 'عنوان', summary: 'خلاصه' }],
+      new Date(NOW)
+    );
+    expect(buildImageHtml(frame)).toContain('Akhal-Teke / DwAArKa');
+  });
+
+  it('shows RSS display titles without an invented @ prefix', () => {
+    const frame = buildRunFrame(
+      [{ id: 1, channelUsername: 'بی‌بی‌سی فارسی', title: 'عنوان', summary: 'خلاصه' }],
+      new Date(NOW)
+    );
+    const html = buildImageHtml(frame);
+    expect(html).toContain('منبع: بی‌بی‌سی فارسی');
+    expect(html).not.toContain('@بی‌بی‌سی');
+  });
+
   it('escapes html so untrusted summary text cannot inject markup', () => {
     const frame = buildRunFrame(
       [{ id: 1, channelUsername: 'c', title: '<b>x</b>', summary: '<script>alert(1)</script>' }],

@@ -92,7 +92,7 @@ export interface ImageFrame {
   time: string;
   /** Pre-formatted source line, e.g. `منبع: @a` or `منابع: @a · @b`. */
   footer: string;
-  /** Brand signature in the footer corner; defaults to `Akhal-Teke`. */
+  /** Brand signature in the footer corner; defaults to `Akhal-Teke / DwAArKa`. */
   signature?: string;
   items: ImageNewsItem[];
   /** Remaining headlines for the ticker strip; absent when there are none. */
@@ -116,8 +116,16 @@ export function buildSourceFooter(
     if (name && !seen.includes(name)) seen.push(name);
   }
   if (seen.length === 0) return '';
-  if (seen.length === 1) return `منبع: @${seen[0]}`;
-  return `منابع: ${seen.map((name) => `@${name}`).join(' · ')}`;
+  if (seen.length === 1) return `منبع: ${channelLabel(seen[0])}`;
+  return `منابع: ${seen.map(channelLabel).join(' · ')}`;
+}
+
+/**
+ * `@username` for real ASCII usernames; RSS display titles (Persian text)
+ * appear verbatim, never with an invented `@`.
+ */
+export function channelLabel(name: string): string {
+  return /^[A-Za-z][A-Za-z0-9_]*$/.test(name) ? `@${name}` : name;
 }
 
 /**
@@ -276,7 +284,7 @@ export function buildImageHtml(frame: ImageFrame): string {
       (item, i) => `<article class="card" style="--c:${ACCENTS[i % 4]}">
         <div class="top">
           <span class="icon">${FA_DIGITS[i % 4]}</span>
-          <div class="txt"><h2>${esc(item.title)}</h2><div class="sub">@${esc(item.channelUsername)}</div></div>
+          <div class="txt"><h2>${esc(item.title)}</h2><div class="sub">${esc(channelLabel(item.channelUsername))}</div></div>
         </div>
         <p>${esc(item.summary)}</p>
         <div class="live">زنده</div>
@@ -397,7 +405,7 @@ export function buildImageHtml(frame: ImageFrame): string {
         .map((t) => `<span class="ti${t.more ? ' more' : ''}">${esc(t.text)}</span>`)
         .join('<span class="tdot">·</span>')}</div>
     </section>` : ''}
-    <div class="foot"><span>${esc(frame.footer)}</span><span class="sig">${esc(frame.signature ?? 'Akhal-Teke')}</span></div>
+    <div class="foot"><span>${esc(frame.footer)}</span><span class="sig">${esc(frame.signature ?? 'Akhal-Teke / DwAArKa')}</span></div>
   </div>
 </body>
 </html>`;

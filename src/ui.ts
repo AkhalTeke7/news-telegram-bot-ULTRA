@@ -160,12 +160,14 @@ export const APP_HTML = `<!DOCTYPE html>
       <pre id="toolsLog" class="log hidden" dir="rtl"></pre>
     </section>
   </div>
-  <div class="signature">Akhal-Teke</div>
+  <div class="signature">Akhal-Teke / DwAArKa</div>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
 const setMsg = (el, text, kind) => { el.textContent = text; el.className = 'msg' + (kind ? ' ' + kind : ''); };
 const mk = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+// Bale mirror verdict of a test send; empty when Bale is not configured.
+const baleNote = (b) => b === undefined ? '' : (b.sent ? ' بیل: ارسال شد ✅' : ' بیل: ناموفق ❌');
 
 function faDate(iso) {
   if (!iso) return 'هرگز';
@@ -519,8 +521,8 @@ $('testMessageBtn').onclick = async () => {
   btn.disabled = true;
   setMsg($('toolsMsg'), 'در حال ارسال پیام آزمایشی…', null);
   try {
-    await api('/api/telegram/test-message', { method: 'POST', body: '{}' });
-    setMsg($('toolsMsg'), '✅ پیام آزمایشی به کانال مقصد ارسال شد.', 'ok');
+    const r = await api('/api/telegram/test-message', { method: 'POST', body: '{}' });
+    setMsg($('toolsMsg'), '✅ پیام آزمایشی به کانال مقصد ارسال شد.' + baleNote(r.bale), 'ok');
   } catch (e) {
     setMsg($('toolsMsg'), e.message, 'err');
   }
@@ -535,7 +537,7 @@ $('testImageBtn').onclick = async () => {
   setMsg($('toolsMsg'), 'در حال ساخت و ارسال تصویر آزمایشی…', null);
   try {
     const r = await api('/api/telegram/test-image', { method: 'POST', body: '{}' });
-    setMsg($('toolsMsg'), '✅ تصویر آزمایشی ارسال شد — ' + r.cards + ' کارت، ' + r.ticker + ' عنوان دیگر.', 'ok');
+    setMsg($('toolsMsg'), '✅ تصویر آزمایشی ارسال شد — ' + r.cards + ' کارت، ' + r.ticker + ' عنوان دیگر.' + baleNote(r.bale), 'ok');
   } catch (e) {
     setMsg($('toolsMsg'), e.message, 'err');
   }
