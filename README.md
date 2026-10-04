@@ -1,10 +1,11 @@
 # Persian News Bot for Telegram and Bale
 
-Persian (Farsi) RTL news bot on Cloudflare Workers. Every hour it collects news from public
+Persian (Farsi) RTL news bot on Cloudflare Workers. Every two hours it collects news from public
 Telegram channels and configured RSS feeds, filters advertisements, summarizes and ranks
-stories with **free OpenCode/Zen models only**, renders important stories as a Vazirmatn
-HTML screenshot with Cloudflare Browser Run, and publishes text and images to Telegram
-and/or Bale.
+stories with **free OpenCode/Zen models only**, renders the run as a Vazirmatn HTML
+screenshot with Cloudflare Browser Run (top-4 news as cards plus every remaining headline
+in a one-line ticker), and publishes text and images to Telegram and, when configured,
+mirrors the same output to Bale.
 
 RSS sources currently include BBC Persian, Zoomit, Mobile.ir, and IRIB News. No paid
 models, MTProto, OpenRouter, or committed credentials are required.
@@ -12,8 +13,8 @@ models, MTProto, OpenRouter, or committed credentials are required.
 ## Pipeline
 
 ```
-Cron (hourly, at :00 Tehran time)
-  └─ collect   → Telegram previews + RSS feeds  → D1 `messages`   (1-hour window, deduped)
+Cron (every two hours, at even Tehran hours)
+  └─ collect   → Telegram previews + RSS feeds  → D1 `messages`   (2-hour window, deduped)
   └─ filter    → local advertisement filter      → filter_status    (no AI, no network)
   └─ summarize → POST https://opencode.ai/zen/v1/chat/completions → summary_text + title
   └─ rank      → one global AI comparison        → importance (1–5)
@@ -22,8 +23,8 @@ Cron (hourly, at :00 Tehran time)
 ```
 
 Each stage is isolated: one failing channel, message, or model never stops the rest.
-Failures are retried on the next hourly run because a message is only marked complete
-after its work is persisted.
+Failures are retried on the next run (every two hours) because a message is only marked
+complete after its work is persisted.
 
 ## Requirements
 
@@ -119,11 +120,20 @@ shown in the UI, or written to the database.
 
 ## Bale delivery
 
-Bale delivery uses the official Bale Business Bot API at `https://tapi.bale.ai/business/bot`.
-The transport supports both `sendMessage` and `sendPhoto`, including PNG multipart upload.
-Add the Bale bot to the destination channel with permission to post, then configure
-`BALE_BOT_TOKEN` and `BALE_DESTINATION_CHANNEL`. Telegram and Bale configuration is
-independent: either destination may be enabled, or both may be enabled.
+Bale delivery mirrors the Telegram output through the official Bale Business Bot API at
+`https://tapi.bale.ai/business/bot`: the single run image (`sendPhoto`, PNG multipart)
+and every **delivered** text digest part (`sendMessage`). Add the Bale bot to the
+destination channel with permission to post, then configure `BALE_BOT_TOKEN` and
+`BALE_DESTINATION_CHANNEL` (both are required; without them publishing stays
+Telegram-only).
+
+The mirror is best-effort and fully isolated: a Bale failure is logged under the
+`bale` operation with a safe reason and counted in the run report
+(`publishing.bale.sent` / `failed`, shown as a «بیل: …» line in the Telegram manual-run
+report), but never affects Telegram delivery or `published_at` state. Only parts Telegram
+actually delivered are mirrored, so a later retry of an undelivered part cannot
+duplicate on Bale. Bale calls carry a 15-second timeout so one slow request cannot
+consume the invocation budget.
 
 Bale credentials must never be placed in `wrangler.json`, committed to Git, or included
 in `.dev.vars` committed files. Use `wrangler secret put` for tokens. Destination IDs
@@ -182,10 +192,14 @@ channel order. Legacy rows with a null score remain eligible as a migration fall
 
 When `BROWSER` is configured, publishing makes one Cloudflare Browser Run screenshot
 request per pipeline run. The Worker builds a Persian RTL HTML/CSS frame with the top
-four eligible items, titles, summaries, source labels, and Tehran date/time. Browser Run
-rasterizes it at 1920×1080; the PNG is immediately sent to the destination with
-Telegram `sendPhoto` and is not stored in D1 or R2. Image failure is isolated, so the
-ordinary per-channel text digests still publish.
+four eligible items as cards (titles, summaries, source labels) and a horizontal
+**ticker strip** below them carrying every remaining headline of the run — one brief
+single-line entry per item, truncated at a word boundary, with a trailing
+«و n خبر دیگر» line when more than eight remain. The footer credits every channel
+visible in the image, cards and ticker alike. Browser Run rasterizes it at 1920×1080;
+the PNG is immediately sent to the destination with Telegram `sendPhoto` (and mirrored
+to Bale when configured) and is not stored in D1 or R2. Image failure is isolated, so
+the ordinary per-channel text digests still publish.
 
 ## Advertisement filter
 
@@ -250,11 +264,31 @@ the database and expire automatically).
 sends one clearly-marked test message to the configured destination channel and reports
 the outcome. It verifies the exact publish path — `TELEGRAM_BOT_TOKEN`,
 `TELEGRAM_DESTINATION_CHANNEL`, and the bot's admin rights in the destination channel —
-without waiting for the hourly cron and without needing fresh news in the window.
+without waiting for the scheduled cron run and without needing fresh news in the window.
 
 The shared implementation is `sendTestMessage()` in `src/testMessage.ts`; the Telegram
 admin interface and the authenticated `POST /api/telegram/test-message` endpoint both call
-it. It never throws: every failure comes back as a safe Persian reason with a stable
+it.
+
+### Image-only test
+
+`/testimage` (or the `🖼 تصویر آزمایشی` menu button, or the same button in the web admin
+panel) tests ONLY the image path, end to end, with **real** news:
+
+- it reads the actual pending publishable rows from D1 (exactly what the next run would
+  publish), renders them through Browser Run (top-4 cards + ticker) and sends just the
+  PNG to the destination with `sendPhoto`;
+- **nothing is marked published** — the next real run still publishes every row normally;
+  no text digests are sent;
+- when there is no pending news (or every row scored importance 1) it replies
+  «خبری در انتظار انتشار نیست» and sends nothing;
+- failure categories: `no_news`, `browser_missing`, `destination_not_configured`,
+  `invalid_destination`, `token_missing`, `render_failed`, plus the shared Telegram
+  categories (`rate_limited`, `network`, `telegram_error`).
+
+The implementation is `sendTestImage()` in `src/testImage.ts`; the API equivalent is the
+authenticated `POST /api/telegram/test-image` (200 with `{messageId, cards, ticker,
+bytes}`, 404 for no news, 503 for missing configuration, 502/429 for Telegram failures). It never throws: every failure comes back as a safe Persian reason with a stable
 category (`destination_not_configured`, `invalid_destination`, `token_missing`,
 `rate_limited`, `network`, `telegram_error`). Telegram's own rejection description (e.g.
 `Bad Request: chat not found`) is shown to the admin because it is the fastest way to spot
@@ -264,7 +298,7 @@ destination value are never echoed, logged, or written to the database.
 ### Manual processing
 
 `📰 پردازش دستی` → `▶️ اجرای پردازش` runs the **same** `runNewsPipeline()` used by the
-hourly Cron Trigger, so a manual run keeps the one-hour window, deduplication,
+bi-hourly Cron Trigger, so a manual run keeps the two-hour window, deduplication,
 free-model-only policy, model rotation, summary/publish validation, Telegram rate-limit
 handling, per-channel and per-message isolation, stage isolation, publishing limits and
 cron bookkeeping. The webhook returns immediately and reports the outcome when finished.
@@ -405,6 +439,7 @@ another CI pipeline, make sure the build command installs dependencies
 | DELETE | `/api/channels/:id` | 204 |
 | GET | `/api/status` | counts, timestamps, error categories (no secrets) |
 | POST | `/api/telegram/test-message` | sends a test message to the destination; `{messageId}` on success, 503/502/429 with a Persian reason otherwise (no secrets) |
+| POST | `/api/telegram/test-image` | renders the real pending news and sends only the image; `{messageId, cards, ticker, bytes}` on success, 404 no news, 503 config, 502/429 Telegram |
 
 Write endpoints require `content-type: application/json` and the session cookie
 (`HttpOnly`, `Secure`, `SameSite=Strict`), which blocks CSRF.
@@ -422,9 +457,10 @@ Write endpoints require `content-type: application/json` and the session cookie
    immediately, and another free model is selected. If no free model is available the run
    stops and the messages stay unsummarized — there is no paid fallback anywhere.
 
-## Hourly cron behaviour
+## Bi-hourly cron behaviour
 
-**The automatic pipeline runs at the beginning of every Iranian hour** (`Asia/Tehran`).
+**The automatic pipeline runs at the beginning of every other Iranian hour**
+(`Asia/Tehran`).
 
 Cloudflare's Cron Triggers are **UTC only** — the docs state "Cron Triggers execute on UTC
 time" and the supported-syntax table has no timezone field, so `CRON_TZ`/`TZ=` prefixes are
@@ -433,26 +469,31 @@ time" and the supported-syntax table has no timezone field, so `CRON_TZ`/`TZ=` p
 | Iranian hour | UTC firing |
 |---|---|
 | 00:00 Tehran | 20:30 UTC (previous day) |
-| 01:00 Tehran | 21:30 UTC |
+| 02:00 Tehran | 22:30 UTC (previous day) |
 | … | … |
-| 23:00 Tehran | 19:30 UTC |
+| 22:00 Tehran | 19:30 UTC |
 
 Iran is a fixed **UTC+03:30** with no daylight saving (abolished in 1401 SH / 2022), so
-every Iranian hour boundary falls on a UTC `:30`. A single trigger covers all 24 hours:
+every Iranian hour boundary falls on a UTC `:30`. A single trigger covers the whole day:
 
 ```jsonc
-"triggers": { "crons": ["30 * * * *"] }
+"triggers": { "crons": ["30 */2 * * *"] }
 ```
+
+The collector's window is **two hours** (`DEFAULT_WINDOW_MS` in `src/collector.ts`) to
+match: a one-hour window would silently miss the news posted during the skipped hour, and
+the `UNIQUE (source_channel_id, telegram_message_id)` constraint keeps the wider window
+from double-inserting.
 
 There is exactly one automatic trigger, and manual Telegram processing is unaffected.
 
 Timestamps are stored canonically in UTC (`cron_runs.ran_at`, `created_at`, …) and are
 converted to `Asia/Tehran` only when displayed to the admin, using the runtime's IANA
 timezone support (`Intl.DateTimeFormat` with `timeZone: 'Asia/Tehran'`), never a manual
-"+3:30" addition. Admin screens and the hourly Telegram report show the Persian (Jalali)
+"+3:30" addition. Admin screens and the Telegram run report show the Persian (Jalali)
 date and local time, e.g. `زمان اجرا: ۱۴۰۴/۱۰/۲۶ - ۰۰:۰۰ به وقت تهران`.
 
 Each run writes a `cron_runs` row (`status`, counters, duration, error summary) so the admin
-panel can show real outcomes. Only posts inside the previous one hour are considered,
+panel can show real outcomes. Only posts inside the previous two hours are considered,
 `UNIQUE (source_channel_id, telegram_message_id)` prevents duplicates, and a Telegram `429`
 stops that run's publish pass instead of retry-looping, leaving the rest for the next hour.

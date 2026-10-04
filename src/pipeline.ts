@@ -12,7 +12,7 @@ import { collectAll } from './collector';
 import { deriveCronStatus, finishCronRun, startCronRun, type CronStatus } from './cronRuns';
 import { runImportanceRanking } from './newsRanking';
 import { collectRss } from './rssCollector';
-import { resolveDestination, runPublishing } from './publisher';
+import { resolveBaleDelivery, resolveDestination, runPublishing } from './publisher';
 import { runSummarization } from './summarizer';
 import type { Env } from './types';
 
@@ -38,7 +38,14 @@ export interface PipelineOutcome {
   filter: { checked: number; filtered: number; passed: number } | null;
   summarization: { eligible: number; summarized: number; failed: number; model: string | null } | null;
   ranking: { candidates: number; ranked: number; important: number; error?: string } | null;
-  publishing: { eligible: number; published: number; failed: number; rateLimited: boolean } | null;
+  publishing: {
+    eligible: number;
+    published: number;
+    failed: number;
+    rateLimited: boolean;
+    /** Present only when the Bale mirror is configured. */
+    bale?: { sent: number; failed: number };
+  } | null;
   durationMs: number;
 }
 
@@ -97,6 +104,8 @@ export async function runNewsPipeline(
       destination: resolveDestination(env) ?? undefined,
       // Optional: skips the single run image when the binding is not configured.
       browser: env.BROWSER,
+      // Optional best-effort Bale mirror of the Telegram output.
+      bale: resolveBaleDelivery(env) ?? undefined,
     })
   );
 
@@ -139,6 +148,7 @@ export async function runNewsPipeline(
       published: publishing.published,
       failed: publishing.failures.length,
       rateLimited: publishing.rateLimited,
+      bale: publishing.bale,
     },
     durationMs: Date.now() - startedAt,
   };

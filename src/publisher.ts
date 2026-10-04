@@ -12,6 +12,7 @@
  */
 
 import { listChannels } from './channels';
+import { baleSendMessage, baleSendPhoto } from './bale';
 import { renderRunImage, type BrowserBinding } from './newsImage';
 import {
   isValidDestinationChat,
@@ -109,6 +110,8 @@ export interface PublishReport {
   destination: string | null;
   /** Absent when no image was attempted. */
   image?: ImagePublishOutcome;
+  /** Bale mirror counters; absent when Bale delivery is not configured. */
+  bale?: { sent: number; failed: number };
 }
 
 export interface PublishOptions {
@@ -122,6 +125,13 @@ export interface PublishOptions {
    */
   browser?: BrowserBinding;
   now?: Date;
+  /**
+   * Optional Bale mirror (BALE_BOT_TOKEN + BALE_DESTINATION_CHANNEL). Every
+   * delivered Telegram message — the run image and each text digest part — is
+   * also sent to Bale. Best effort: a Bale failure is logged and counted but
+   * never affects Telegram delivery or publish state.
+   */
+  bale?: BaleDeliveryOptions;
 }
 
 /** Outcome of the single optional run image. */
@@ -146,6 +156,41 @@ export interface ImagePublishOutcome {
 export function resolveDestination(env: Env): DestinationChat | null {
   const raw = env.TELEGRAM_DESTINATION_CHANNEL?.trim();
   return raw && isValidDestinationChat(raw) ? (raw as DestinationChat) : null;
+}
+
+/** Bale destination: @username or a numeric chat/channel id. */
+export function isValidBaleDestination(value: string): boolean {
+  return /^@[A-Za-z][A-Za-z0-9_]{2,31}$/.test(value) || /^-?\d{1,20}$/.test(value);
+}
+
+/** Credentials for the best-effort Bale mirror of the Telegram output. */
+export interface BaleDeliveryOptions {
+  token: string;
+  destination: string;
+}
+
+/**
+ * Reads the Bale mirror configuration from the server-side environment only.
+ * Returns null when Bale is not configured (either secret missing) or the
+ * destination is malformed — in both cases publishing stays Telegram-only.
+ */
+export function resolveBaleDelivery(env: Env): BaleDeliveryOptions | null {
+  const token = env.BALE_BOT_TOKEN?.trim();
+  const destination = env.BALE_DESTINATION_CHANNEL?.trim();
+  if (!token || !destination) return null;
+  if (!isValidBaleDestination(destination)) {
+    console.error(
+      JSON.stringify({
+        event: 'publish',
+        operation: 'bale',
+        status: 'skipped',
+        category: 'bale_destination_invalid',
+        timestamp: new Date().toISOString(),
+      })
+    );
+    return null;
+  }
+  return { token, destination };
 }
 
 /**
@@ -416,6 +461,14 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
     destination,
   };
 
+  // Best-effort Bale mirror of everything this run delivers to Telegram.
+  const bale = opts.bale ?? null;
+  const baleCounters = { sent: 0, failed: 0 };
+  const finish = (): PublishReport => {
+    if (bale) report.bale = { sent: baleCounters.sent, failed: baleCounters.failed };
+    return report;
+  };
+
   // Phase 4 guarantee: a row whose stored source link is unusable is never
   // published. The link itself is no longer printed, but the check stands.
   const usable = items.filter((i) => SOURCE_URL_RE.test(i.sourceUrl));
@@ -439,6 +492,8 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
     destination,
     token: opts.token,
     browser: opts.browser,
+    bale,
+    baleCounters,
     fetchImpl: opts.fetchImpl,
     baseUrl: opts.baseUrl,
     now: opts.now,
@@ -469,7 +524,7 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
           messagesSent,
           messageBudget,
         });
-        return report;
+        return finish();
       }
 
       try {
@@ -492,6 +547,25 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
           destinationMessageId: sent.message_id,
           newsCount: markedCount,
         });
+
+        // Mirror the delivered part to Bale. Only delivered parts are mirrored,
+        // so a later retry (rows still unpublished) cannot duplicate on Bale.
+        if (bale) {
+          try {
+            await baleSendMessage({
+              token: bale.token,
+              chatId: bale.destination,
+              text: part.text,
+              fetchImpl: opts.fetchImpl,
+            });
+            baleCounters.sent++;
+          } catch (error) {
+            baleCounters.failed++;
+            logBale('error', {
+              reason: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
       } catch (error) {
         const category: PublishErrorCategory =
           error instanceof TelegramRateLimitError
@@ -518,7 +592,7 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
           logPublish('rate_limited', category, group, {
             retryAfterSeconds: error.retryAfterSeconds,
           });
-          return report;
+          return finish();
         }
 
         logPublish('error', category, group, { newsCount: part.itemIds.length });
@@ -526,7 +600,7 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
     }
   }
 
-  return report;
+  return finish();
 }
 
 /**
@@ -547,6 +621,8 @@ async function publishRunImage(input: {
   destination: string;
   token: string;
   browser: BrowserBinding | undefined;
+  bale: BaleDeliveryOptions | null;
+  baleCounters: { sent: number; failed: number };
   fetchImpl?: typeof fetch;
   baseUrl?: string;
   now?: Date;
@@ -579,6 +655,25 @@ async function publishRunImage(input: {
   // No publishable news, or no Browser Run binding configured: no image and no
   // Browser Run request at all.
   if (!rendered) return null;
+
+  // Mirror the rendered PNG to Bale before the Telegram send. Independent and
+  // isolated: a Bale failure never changes the Telegram outcome below.
+  if (input.bale) {
+    try {
+      await baleSendPhoto({
+        token: input.bale.token,
+        chatId: input.bale.destination,
+        photo: rendered.png,
+        fetchImpl: input.fetchImpl,
+      });
+      input.baleCounters.sent++;
+    } catch (error) {
+      input.baleCounters.failed++;
+      logBale('error', {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
   const base: ImagePublishOutcome = {
     selected: rendered.items.length,
@@ -616,6 +711,19 @@ function logImage(status: string, extra: Record<string, unknown> = {}): void {
     JSON.stringify({
       event: 'publish',
       operation: 'runImage',
+      status,
+      timestamp: new Date().toISOString(),
+      ...extra,
+    })
+  );
+}
+
+/** Best-effort Bale mirror bookkeeping; reasons are error messages only. */
+function logBale(status: string, extra: Record<string, unknown> = {}): void {
+  console.log(
+    JSON.stringify({
+      event: 'publish',
+      operation: 'bale',
       status,
       timestamp: new Date().toISOString(),
       ...extra,

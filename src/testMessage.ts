@@ -60,7 +60,15 @@ export function buildTestMessageText(now: Date = new Date()): string {
   ].join('\n');
 }
 
-function describeError(error: unknown): { category: TestMessageErrorCategory; message: string } {
+/**
+ * Maps a failed Telegram call to a safe admin-facing Persian reason with a
+ * stable category. Shared by the test-message and test-image features.
+ * The input is always a thrown error from src/telegram.ts — never raw request
+ * material — so the result cannot leak the token.
+ */
+export function describeTelegramError(
+  error: unknown
+): { category: TestMessageErrorCategory; message: string } {
   if (error instanceof TelegramRateLimitError) {
     const wait = error.retryAfterSeconds > 0 ? `${error.retryAfterSeconds} ثانیه دیگر` : 'چند لحظه بعد';
     return {
@@ -143,7 +151,7 @@ export async function sendTestMessage(
     logTestMessage('ok', { messageId: sent.message_id });
     return { ok: true, messageId: sent.message_id };
   } catch (error) {
-    const { category, message } = describeError(error);
+    const { category, message } = describeTelegramError(error);
     logTestMessage('error', { category });
     return { ok: false, category, message };
   }

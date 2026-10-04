@@ -87,6 +87,7 @@ export const APP_HTML = `<!DOCTYPE html>
       <div class="row">
         <button id="refreshStatus">به‌روزرسانی وضعیت</button>
         <button id="testMessageBtn">🧪 ارسال پیام آزمایشی</button>
+        <button id="testImageBtn">🖼 تصویر آزمایشی</button>
       </div>
       <div id="statusMsg" class="msg"></div>
     </section>
@@ -340,6 +341,21 @@ $('testMessageBtn').onclick = async () => {
   try {
     await api('/api/telegram/test-message', { method: 'POST', body: '{}' });
     setMsg($('statusMsg'), '✅ پیام آزمایشی به کانال مقصد ارسال شد.', 'ok');
+  } catch (e) {
+    setMsg($('statusMsg'), e.message, 'err');
+  }
+  btn.disabled = false;
+};
+
+// Renders the REAL pending news into the run image and sends ONLY that image.
+// Reports the server's verdict; nothing is marked published by the test.
+$('testImageBtn').onclick = async () => {
+  const btn = $('testImageBtn');
+  btn.disabled = true;
+  setMsg($('statusMsg'), 'در حال ساخت و ارسال تصویر آزمایشی…', null);
+  try {
+    const r = await api('/api/telegram/test-image', { method: 'POST', body: '{}' });
+    setMsg($('statusMsg'), '✅ تصویر آزمایشی ارسال شد — ' + r.cards + ' کارت، ' + r.ticker + ' عنوان دیگر.', 'ok');
   } catch (e) {
     setMsg($('statusMsg'), e.message, 'err');
   }

@@ -15,6 +15,7 @@ import {
 import { resolveDestination } from './publisher';
 import { addSourceChannel } from './sourceChannels';
 import { getChannelStats, getStatusReport } from './status';
+import { sendTestImage } from './testImage';
 import { sendTestMessage } from './testMessage';
 import { handleWebhook, type WaitUntilCtx } from './telegramAdmin';
 import { isProductionHost, registerTelegramWebhook } from './telegramSetup';
@@ -192,6 +193,38 @@ export function createApi(): Hono<Bindings> {
       case 'invalid_destination':
       case 'token_missing':
         // Server-side configuration problem, not a Telegram failure.
+        return fail(c, 503, result.message);
+      case 'rate_limited':
+        return fail(c, 429, result.message);
+      default:
+        return fail(c, 502, result.message);
+    }
+  });
+
+  // Renders the REAL pending news into the run image and sends ONLY that image
+  // to the configured destination — a diagnostic for the Browser Run → sendPhoto
+  // path. Nothing is marked published and no text digests are sent.
+  // Authenticated by the admin session; the response never contains the
+  // destination value or the token.
+  app.post('/api/telegram/test-image', async (c) => {
+    const result = await sendTestImage(c.env);
+    if (result.ok) {
+      return c.json({
+        ok: true,
+        messageId: result.messageId,
+        cards: result.cards,
+        ticker: result.ticker,
+        bytes: result.bytes,
+      });
+    }
+    switch (result.category) {
+      case 'no_news':
+        return fail(c, 404, result.message);
+      case 'destination_not_configured':
+      case 'invalid_destination':
+      case 'token_missing':
+      case 'browser_missing':
+        // Server-side configuration problem, not a Telegram/Browser failure.
         return fail(c, 503, result.message);
       case 'rate_limited':
         return fail(c, 429, result.message);

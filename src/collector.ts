@@ -2,7 +2,14 @@ import { insertMessages, listEnabledChannels, markChannelProcessed } from './cha
 import { describeError, fetchChannelPreview } from './telegramPreview';
 import type { Channel } from './types';
 
-export const DEFAULT_WINDOW_MS = 60 * 60 * 1000;
+/**
+ * Collection window: two hours, matching the bi-hourly cron trigger (every
+ * other UTC hour at minute 30, i.e. every other Tehran hour boundary). A
+ * one-hour window would silently miss the news posted during the skipped hour;
+ * dedup (UNIQUE per channel + message id) keeps the wider window from
+ * double-inserting.
+ */
+export const DEFAULT_WINDOW_MS = 2 * 60 * 60 * 1000;
 /**
  * Telegram timestamps come from Telegram's servers. If its clock runs slightly
  * ahead of the Worker's, a strict "not after now" filter would silently drop

@@ -394,7 +394,7 @@ describe('message selection and persistence', () => {
 
     await seedMessage(enabled, 1, 'متن جدید');
     await seedMessage(enabled, 2, '   ');
-    await seedMessage(enabled, 3, 'خیلی قدیمی', 120);
+    await seedMessage(enabled, 3, 'خیلی قدیمی', 180); // older than the 2h window
     await seedMessage(disabled, 4, 'کانال غیرفعال');
 
     await env.DB.prepare(`UPDATE messages SET summarized_at = '2026-10-02T00:00:00.000Z' WHERE telegram_message_id = 1`).run();

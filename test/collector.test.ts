@@ -258,7 +258,7 @@ describe('preview parser', () => {
 describe('collectChannel', () => {
   beforeEach(reset);
 
-  it('inserts new messages from the one-hour window', async () => {
+  it('inserts new messages from the two-hour window', async () => {
     const { id } = await makeChannel('winchannel');
     const channel = (await listEnabledChannels(env.DB))[0];
 
@@ -288,7 +288,7 @@ describe('collectChannel', () => {
     expect(await messagesFor(id)).toHaveLength(1);
   });
 
-  it('ignores messages older than one hour and keeps them out of the DB', async () => {
+  it('ignores messages older than two hours and keeps them out of the DB', async () => {
     const { id } = await makeChannel('oldchan');
     const channel = (await listEnabledChannels(env.DB))[0];
 
@@ -297,8 +297,8 @@ describe('collectChannel', () => {
       fetchImpl: fakeFetch(
         previewHtml(
           [
-            { id: 300, minutesAgo: 59 },
-            { id: 299, minutesAgo: 61 },
+            { id: 300, minutesAgo: 119 },
+            { id: 299, minutesAgo: 121 },
             { id: 298, minutesAgo: 600 },
           ],
           'oldchan'
@@ -312,7 +312,7 @@ describe('collectChannel', () => {
     expect(rows.map((r) => r.telegram_message_id)).toEqual([300]);
   });
 
-  it('treats the window as inclusive at the one-hour boundary', async () => {
+  it('treats the window as inclusive at the two-hour boundary', async () => {
     const { id } = await makeChannel('edgechan');
     const channel = (await listEnabledChannels(env.DB))[0];
 
@@ -321,8 +321,8 @@ describe('collectChannel', () => {
       fetchImpl: fakeFetch(
         previewHtml(
           [
-            { id: 400, minutesAgo: 60 },
-            { id: 399, minutesAgo: 61 },
+            { id: 400, minutesAgo: 120 },
+            { id: 399, minutesAgo: 121 },
           ],
           'edgechan'
         )
@@ -487,9 +487,9 @@ describe('collectAll', () => {
     expect((await getChannelById(env.DB, bad.id))!.lastCheckedAt).toBeNull();
   });
 
-  it('reports a window of exactly one hour', async () => {
+  it('reports a window of exactly two hours', async () => {
     const summary = await collectAll(env.DB, { now: NOW, fetchImpl: fakeFetch(previewHtml([])) });
-    expect(summary.windowMs).toBe(60 * 60 * 1000);
+    expect(summary.windowMs).toBe(2 * 60 * 60 * 1000); // bi-hourly cron -> 2h window
     expect(summary.windowStart).toBe(new Date(NOW - WINDOW_MS).toISOString());
   });
 

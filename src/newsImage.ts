@@ -15,6 +15,9 @@
  *  - The image is never persisted. The PNG exists as one local variable for the
  *    duration of the send and is dropped immediately afterwards; nothing is
  *    written to D1, R2 or any other store.
+ *  - The image carries ALL of the run's news: the top four items as cards and
+ *    every remaining headline in a horizontal ticker strip below them, one
+ *    brief single-line entry per item.
  *
  * The image is completely independent of the per-channel text digests: those
  * are still built and sent by `runPublishing()` exactly as before.
@@ -32,6 +35,10 @@ export const MAX_IMAGE_ITEMS = 4;
 const MIN_HEADLINE_CHARS = 24;
 const CARD_TITLE_MAX_CHARS = 90;
 
+/** Ticker: every remaining headline, one per line, kept brief. */
+export const MAX_TICKER_ITEMS = 8;
+export const TICKER_MAX_CHARS = 72;
+
 /** The Browser Run binding, structurally typed so tests can supply a fake. */
 export interface BrowserBinding {
   quickAction(action: 'screenshot', payload: Record<string, unknown>): Promise<Response>;
@@ -47,6 +54,37 @@ export interface ImageNewsItem {
   summary: string;
 }
 
+/** One single-line entry in the horizontal ticker below the cards. */
+export interface TickerNewsItem {
+  id: number;
+  channelUsername: string;
+  /** Already truncated to TICKER_MAX_CHARS so the line stays brief. */
+  text: string;
+  /** Marks the trailing «و n خبر دیگر» overflow line. */
+  more?: boolean;
+}
+
+export interface TickerSelection {
+  items: TickerNewsItem[];
+  /** Rows left over after MAX_TICKER_ITEMS; shown as «و n خبر دیگر». */
+  hidden: number;
+}
+
+/** Persian digits for the image, matching the fa-IR date/time formatting. */
+export function faDigits(value: number): string {
+  const FA = '۰۱۲۳۴۵۶۷۸۹';
+  return String(value).replace(/\d/g, (d) => FA[Number(d)]);
+}
+
+/** Brief one-line headline for the ticker: truncate at a word boundary. */
+function truncateLine(text: string, limit: number): string {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (clean.length <= limit) return clean;
+  const cut = clean.slice(0, limit - 1);
+  const space = cut.lastIndexOf(' ');
+  return `${(space > limit * 0.6 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
+
 export interface ImageFrame {
   headline: string;
   kicker: string;
@@ -57,16 +95,21 @@ export interface ImageFrame {
   /** Brand signature in the footer corner; defaults to `Akhal-Teke`. */
   signature?: string;
   items: ImageNewsItem[];
+  /** Remaining headlines for the ticker strip; absent when there are none. */
+  ticker?: TickerNewsItem[];
 }
 
 /**
  * Source line for the image footer.
  *
- * A single represented channel keeps the singular form. When the Top 4 spans
- * several channels, every unique channel is listed once, in the order it first
- * appears among the selected items. Per-card `@channel` labels are unchanged.
+ * A single represented channel keeps the singular form. When the image spans
+ * several channels — cards AND ticker lines — every unique channel is listed
+ * once, in the order it first appears among the selected items. Per-card
+ * `@channel` labels are unchanged.
  */
-export function buildSourceFooter(items: ImageNewsItem[]): string {
+export function buildSourceFooter(
+  items: readonly { channelUsername: string }[]
+): string {
   const seen: string[] = [];
   for (const item of items) {
     const name = item.channelUsername.trim();
@@ -154,6 +197,47 @@ export function selectTopNews(
   }));
 }
 
+/**
+ * Every remaining headline for the horizontal ticker below the cards.
+ *
+ * Same eligibility and ordering as selectTopNews, minus the top cards already
+ * chosen. Each entry becomes ONE brief line (title, else the derived headline,
+ * truncated to TICKER_MAX_CHARS). Items beyond MAX_TICKER_ITEMS are counted in
+ * `hidden` so the frame can end the ticker with «و n خبر دیگر».
+ */
+export function selectTickerNews(
+  items: readonly PublishableMessage[],
+  excludeIds: ReadonlySet<number>,
+  limit = MAX_TICKER_ITEMS
+): TickerSelection {
+  const usable = items.filter(
+    (i) =>
+      i.summaryText.trim().length > 0 &&
+      i.importance !== 1 &&
+      !excludeIds.has(i.id)
+  );
+  if (usable.length === 0 || limit <= 0) return { items: [], hidden: 0 };
+
+  const ranked = [...usable].sort((a, b) => {
+    const byImportance = (b.importance ?? 0) - (a.importance ?? 0);
+    if (byImportance !== 0) return byImportance;
+    const byDate = b.messageDate.localeCompare(a.messageDate);
+    if (byDate !== 0) return byDate;
+    return a.id - b.id;
+  });
+
+  const shown = ranked.slice(0, limit).map((item) => ({
+    id: item.id,
+    channelUsername: item.channelUsername,
+    text: truncateLine(
+      item.title && item.title.trim() ? item.title.trim() : deriveCardTitle(item.summaryText),
+      TICKER_MAX_CHARS
+    ),
+  }));
+
+  return { items: shown, hidden: Math.max(0, ranked.length - shown.length) };
+}
+
 /** Glossy decorative bubbles (white + gold), same look as the price-board style. */
 function bubbles(): string {
   const b = (cls: string, l: number, t: number, w: number, h: number, r: number): string =>
@@ -201,6 +285,7 @@ export function buildImageHtml(frame: ImageFrame): string {
     .join('\n        ');
 
   const grid = ['one', 'two', 'three', 'four'][Math.max(0, Math.min(3, items.length - 1))];
+  const tickerItems = frame.ticker ?? [];
 
   return `<!DOCTYPE html>
 <html lang="fa" dir="rtl">
@@ -273,6 +358,14 @@ export function buildImageHtml(frame: ImageFrame): string {
   .grid.two h2{font-size:48px;-webkit-line-clamp:3}.grid.two p{font-size:32px;-webkit-line-clamp:7}
   .grid.three .card:first-child p{-webkit-line-clamp:2}.grid.three p{-webkit-line-clamp:2}.grid.three h2{font-size:34px}
   .grid.four h2{font-size:34px}.grid.four p{-webkit-line-clamp:3}
+  .ticker{display:flex;align-items:flex-start;gap:20px;margin-top:14px;padding:16px 28px;border-radius:26px;
+    background:linear-gradient(145deg,rgba(255,255,255,.5),rgba(255,255,255,.24));border:1px solid rgba(255,255,255,.65);
+    box-shadow:inset 1px 1px 2px rgba(255,255,255,.9),0 8px 18px rgba(70,82,110,.08)}
+  .tlabel{flex:none;margin-top:3px;font-size:24px;font-weight:800;color:var(--soft)}
+  .titems{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;min-width:0}
+  .ti{max-width:780px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:25px;font-weight:400;line-height:1.55;color:#3a4150}
+  .ti.more{color:var(--soft);font-weight:500}
+  .tdot{flex:none;color:var(--soft);font-size:25px;line-height:1.55;opacity:.7}
   .foot{display:flex;justify-content:space-between;align-items:center;padding:0 12px;height:92px;font-size:28px;font-weight:500;color:#3d4452}
   .sig{font-family:'Bitcount Ink',Arial,sans-serif;font-size:34px;font-weight:400;letter-spacing:.8px;direction:ltr;text-shadow:1px 1px 0 rgba(255,255,255,.65)}
 </style>
@@ -298,6 +391,12 @@ export function buildImageHtml(frame: ImageFrame): string {
     <section class="grid ${grid}">
         ${cards}
     </section>
+    ${tickerItems.length > 0 ? `<section class="ticker">
+      <span class="tlabel">سایر عناوین</span>
+      <div class="titems">${tickerItems
+        .map((t) => `<span class="ti${t.more ? ' more' : ''}">${esc(t.text)}</span>`)
+        .join('<span class="tdot">·</span>')}</div>
+    </section>` : ''}
     <div class="foot"><span>${esc(frame.footer)}</span><span class="sig">${esc(frame.signature ?? 'Akhal-Teke')}</span></div>
   </div>
 </body>
@@ -305,7 +404,11 @@ export function buildImageHtml(frame: ImageFrame): string {
 }
 
 /** Builds the frame for a run, using the project's Asia/Tehran handling. */
-export function buildRunFrame(items: ImageNewsItem[], now: Date): ImageFrame {
+export function buildRunFrame(
+  items: ImageNewsItem[],
+  now: Date,
+  ticker: TickerNewsItem[] = []
+): ImageFrame {
   const parts = tehranParts(now);
   const full = formatTehranDateTime(now);
   const [date, time] = full ? full.split(' - ') : ['', ''];
@@ -314,8 +417,10 @@ export function buildRunFrame(items: ImageNewsItem[], now: Date): ImageFrame {
     kicker: 'گزارش خبری خودکار',
     date: date || (parts ? `${parts.year}/${parts.month}/${parts.day}` : ''),
     time: time || (parts ? `${parts.hour}:${parts.minute}` : ''),
-    footer: buildSourceFooter(items),
+    // The footer credits every channel visible in the image: cards and ticker.
+    footer: buildSourceFooter([...items, ...ticker]),
     items,
+    ticker,
   };
 }
 
@@ -327,6 +432,8 @@ export interface RenderedImage {
   browserRunMs: number;
   /** Exactly what the image shows, in display order. */
   items: ImageNewsItem[];
+  /** Headlines shown in the ticker strip below the cards (overflow line excluded). */
+  tickerCount: number;
 }
 
 export class NewsImageError extends Error {
@@ -369,7 +476,20 @@ export async function renderRunImage(
   if (selected.length === 0) return null;
   if (!opts.browser) return null;
 
-  const html = buildImageHtml(buildRunFrame(selected, opts.now ?? new Date()));
+  // Every remaining headline becomes one brief line in the ticker below the
+  // cards, so the single image still carries ALL of the run's news.
+  const ticker = selectTickerNews(opts.items, new Set(selected.map((s) => s.id)));
+  const tickerItems: TickerNewsItem[] = [...ticker.items];
+  if (ticker.hidden > 0) {
+    tickerItems.push({
+      id: 0,
+      channelUsername: '',
+      text: `و ${faDigits(ticker.hidden)} خبر دیگر`,
+      more: true,
+    });
+  }
+
+  const html = buildImageHtml(buildRunFrame(selected, opts.now ?? new Date(), tickerItems));
   const started = Date.now();
 
   let response: Response;
@@ -401,5 +521,6 @@ export async function renderRunImage(
     height: size.height,
     browserRunMs,
     items: selected,
+    tickerCount: ticker.items.length,
   };
 }
