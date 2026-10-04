@@ -156,6 +156,18 @@ export function selectTopNews(
   }));
 }
 
+/** Glossy decorative bubbles matching the reference dashboard. */
+function bubbles(): string {
+  const bubble = (cls: string, left: number, top: number, size: number): string =>
+    `<div class="bubble ${cls}" style="left:${left}px;top:${top}px;width:${size}px;height:${size}px"></div>`;
+  return [
+    bubble('gold', 420, 50, 96),
+    bubble('', 36, 760, 150),
+    bubble('gold mini', 170, 930, 48),
+    bubble('', 1700, 905, 96),
+  ].join('');
+}
+
 /** Deterministic particle scatter: seeded PRNG, never Math.random(). */
 function particles(count: number, seed: number): string {
   let a = seed >>> 0;
@@ -211,6 +223,9 @@ export function buildImageHtml(frame: ImageFrame): string {
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bitcount+Ink&display=block" rel="stylesheet">
 <style>
   @font-face{font-family:'Vazirmatn';font-style:normal;font-weight:400;font-display:block;
     src:url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/webfonts/Vazirmatn-Regular.woff2') format('woff2');}
@@ -225,6 +240,9 @@ export function buildImageHtml(frame: ImageFrame): string {
       linear-gradient(135deg,#e8edf8 0%,#dfe5f1 42%,#eef1ed 100%);}
   .particles{position:absolute;inset:0}
   .particles i{position:absolute;border-radius:50%;display:block}
+  .bubble{position:absolute;pointer-events:none;border-radius:50%;background:radial-gradient(circle at 30% 24%,rgba(255,255,255,.95),rgba(255,255,255,.2) 18%,rgba(150,170,205,.35) 100%);border:1px solid rgba(255,255,255,.8);box-shadow:inset 8px 8px 18px rgba(255,255,255,.9),inset -11px -14px 24px rgba(105,120,155,.35),0 20px 30px rgba(70,80,110,.2)}
+  .bubble.gold{background:radial-gradient(circle at 30% 24%,#fffbe6,rgba(255,225,120,.5) 20%,rgba(238,176,30,.45) 100%)}
+  .bubble.mini{box-shadow:inset 3px 3px 7px rgba(255,251,225,.9),inset -4px -5px 9px rgba(200,140,10,.28),0 8px 12px rgba(190,140,30,.2)}
   .frame{position:relative;width:${IMAGE_WIDTH}px;height:${IMAGE_HEIGHT}px;padding:72px 78px 0;display:flex;flex-direction:column}
   .frame::before{content:'';position:absolute;inset:168px 28px 34px;border-radius:42px;
     background:rgba(255,255,255,.38);border:2px solid rgba(255,255,255,.72);
@@ -235,7 +253,9 @@ export function buildImageHtml(frame: ImageFrame): string {
   .pill{display:flex;align-items:center;gap:26px;padding:26px 40px;border-radius:52px;
     background:linear-gradient(180deg,rgba(255,255,255,.78),rgba(255,255,255,.42));
     border:2px solid rgba(255,255,255,.82);font-size:32px;font-weight:600;color:#343b4a;box-shadow:0 14px 32px rgba(63,94,251,.12)}
-  .pill .time{font-weight:700;color:#8e54bf}
+  .pill{position:relative;min-width:420px;min-height:150px;justify-content:center;flex-direction:column;gap:2px}
+  .pill svg{position:absolute;inset:0;width:100%;height:100%;z-index:-1;fill:rgba(180,210,245,.45);stroke:rgba(255,255,255,.9);stroke-width:2;filter:drop-shadow(0 10px 14px rgba(70,95,150,.22))}
+  .pill .time{font-weight:700;color:#3a6fb8}
   .rule{height:2px;margin-top:42px;border-radius:1px;
     background:linear-gradient(90deg,transparent,#8e54bf 42%,#fc466b 72%,transparent)}
   .grid{flex:1;display:grid;gap:22px;padding:28px 28px 0;min-height:0}
@@ -258,11 +278,12 @@ export function buildImageHtml(frame: ImageFrame): string {
   .card h2{position:relative;font-size:40px;font-weight:800;line-height:1.32;color:#202838}
   .card p{position:relative;font-size:27px;font-weight:400;line-height:1.45;color:#596274;opacity:.93}
   .foot{display:flex;justify-content:space-between;align-items:center;padding:22px 28px 34px;font-size:28px;font-weight:600;color:#596274;text-align:right}
-  .sig{font-family:system-ui,sans-serif;font-size:30px;font-weight:700;letter-spacing:1px;color:#8e54bf;direction:ltr}
+  .sig{font-family:'Bitcount Ink',system-ui,sans-serif;font-size:34px;font-weight:400;letter-spacing:1px;color:#8e54bf;direction:ltr}
 </style>
 </head>
 <body>
   <div class="particles">${particles(14, 0x5eed1234)}</div>
+  ${bubbles()}
   <div class="frame">
     <div class="head">
       <div>
@@ -270,6 +291,7 @@ export function buildImageHtml(frame: ImageFrame): string {
         <div class="kicker">${esc(frame.kicker)}</div>
       </div>
       <div class="pill">
+        <svg viewBox="0 0 372 150" aria-hidden="true"><path d="M66 128A34 34 0 0 1 66 60A32 32 0 0 1 122 44A52 52 0 0 1 214 40A50 50 0 0 1 306 60A34 34 0 0 1 306 128Z"/></svg>
         <span>${esc(frame.date)}</span><span class="time">${esc(frame.time)}</span>
       </div>
     </div>
