@@ -103,9 +103,13 @@ function harness(opts: { png?: ArrayBuffer; sendStatus?: number } = {}) {
         { status, headers: { 'content-type': 'application/json' } }
       );
     }
-    if (href.includes('sendMessage')) {
+    if (href.includes('sendMessage') || href.includes('sendRichMessage')) {
       order.push('sendMessage');
-      texts.push(JSON.parse(String(init.body)).text);
+      const body = JSON.parse(String(init.body)) as {
+        text?: string;
+        rich_message?: { html?: string };
+      };
+      texts.push(body.text ?? body.rich_message?.html ?? '');
       return new Response(JSON.stringify({ ok: true, result: { message_id: ++messageId } }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -311,14 +315,14 @@ describe('news selection', () => {
 });
 
 describe('image html', () => {
-  it('is a 1920x1080 RTL Liquid Glass frame with escaped content', () => {
+  it('is a 2560x1440 high-resolution RTL Liquid Glass frame with escaped content', () => {
     const frame = buildRunFrame(
       [{ id: 1, channelUsername: 'iran_efsha_news', title: 'عنوان', summary: 'خلاصه' }],
       new Date(NOW)
     );
     const html = buildImageHtml(frame);
-    expect(html).toContain('width:1920px');
-    expect(html).toContain('height:1080px');
+    expect(html).toContain('width:2560px');
+    expect(html).toContain('height:1440px');
     expect(html).toContain('dir="rtl"');
     expect(html).toContain('lang="fa"');
     expect(html).toContain('منبع: @iran_efsha_news');
@@ -585,7 +589,8 @@ describe('runPublishing image integration', () => {
       browser: h.browser,
       now: new Date(NOW),
     });
-    expect(h.texts[0]).toBe('خلاصهٔ خبر برای کانال اول.\n\nمنبع: @news_a\n@destination');
+    expect(h.texts[0]).toContain('📰 <b>خبر عمومی</b>\n📝 <b>خلاصه:</b> خلاصهٔ خبر برای کانال اول.');
+    expect(h.texts[0]).toContain('📡 <i>منبع: @news_a</i>\n📣 <i>@destination</i>');
   });
 
   it('shows the globally most important news from all channels in one image', async () => {

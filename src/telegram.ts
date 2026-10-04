@@ -117,10 +117,14 @@ export interface SentMessage {
   date: number;
 }
 
+export type TelegramParseMode = 'HTML' | 'MarkdownV2';
+
 export interface SendMessageOptions extends TelegramClientOptions {
   chatId: DestinationChat;
-  /** Plain text only: no parse_mode, so untrusted content cannot break formatting. */
+  /** Text to send. Callers must escape untrusted values when using a parse mode. */
   text: string;
+  /** Optional Telegram rich-text parser. News digests use HTML. */
+  parseMode?: TelegramParseMode;
   disableNotification?: boolean;
   replyMarkup?: InlineKeyboardMarkup;
   /** Bounded so one slow Telegram call cannot consume the invocation budget. */
@@ -205,6 +209,7 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SentMessage
     chat_id: opts.chatId,
     text: opts.text,
   };
+  if (opts.parseMode) payload.parse_mode = opts.parseMode;
   if (opts.disableNotification) payload.disable_notification = 'true';
   if (opts.replyMarkup) payload.reply_markup = JSON.stringify(opts.replyMarkup);
 
@@ -221,6 +226,59 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SentMessage
     throw new TelegramError(0, `Telegram sendMessage failed: ${reason}`);
   }
 
+  return parseSentMessageResponse(res, 'sendMessage');
+}
+
+/** Input shape accepted by Telegram's Rich Messages API. */
+export interface TelegramRichMessage {
+  html?: string;
+  markdown?: string;
+  is_rtl?: boolean;
+  skip_entity_detection?: boolean;
+}
+
+export interface SendRichMessageOptions extends TelegramClientOptions {
+  chatId: DestinationChat;
+  richMessage: TelegramRichMessage;
+  disableNotification?: boolean;
+  timeoutMs?: number;
+}
+
+export const SEND_RICH_MESSAGE_TIMEOUT_MS = 15_000;
+
+/**
+ * Bot API `sendRichMessage` (Rich Messages API 10.3).
+ *
+ * The digest builder uses `tg-rich-messages` to validate/build the HTML payload;
+ * this transport keeps the API call separate so a rich message never falls
+ * through the ordinary entity parser or loses its RTL document metadata.
+ */
+export async function sendRichMessage(opts: SendRichMessageOptions): Promise<SentMessage> {
+  const doFetch = opts.fetchImpl ?? fetch;
+  const base = opts.baseUrl ?? API_BASE;
+  const payload: Record<string, unknown> = {
+    chat_id: opts.chatId,
+    rich_message: opts.richMessage,
+  };
+  if (opts.disableNotification) payload.disable_notification = true;
+
+  let res: Response;
+  try {
+    res = await doFetch(`${base}/bot${opts.token}/sendRichMessage`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? SEND_RICH_MESSAGE_TIMEOUT_MS),
+    });
+  } catch (e) {
+    const reason = e instanceof Error && e.name === 'TimeoutError' ? 'timed out' : message(e);
+    throw new TelegramError(0, `Telegram sendRichMessage failed: ${reason}`);
+  }
+
+  return parseSentMessageResponse(res, 'sendRichMessage');
+}
+
+async function parseSentMessageResponse(res: Response, operation: string): Promise<SentMessage> {
   const data = (await res.json().catch(() => null)) as
     | { ok: boolean; result?: SentMessage; description?: string; parameters?: { retry_after?: number } }
     | null;
@@ -237,7 +295,7 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SentMessage
   if (!res.ok || !data?.ok || data.result === undefined) {
     throw new TelegramError(
       res.status,
-      data?.description ?? `Telegram sendMessage failed with status ${res.status}`
+      data?.description ?? `Telegram ${operation} failed with status ${res.status}`
     );
   }
   return data.result;

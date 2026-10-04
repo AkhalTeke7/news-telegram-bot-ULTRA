@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getChatByUsername, getMe, TelegramError } from '../src/telegram';
+import { getChatByUsername, getMe, sendMessage, sendRichMessage, TelegramError } from '../src/telegram';
 
 const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -28,6 +28,52 @@ describe('telegram bot api client', () => {
     const chat = await getChatByUsername({ token: 'T', fetchImpl }, 'somechannel');
     expect(chat.title).toBe('اخبار');
     expect(chat.type).toBe('channel');
+  });
+
+  it('sends HTML parse mode when a rich-text digest requests it', async () => {
+    let body: Record<string, string> | undefined;
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      body = JSON.parse(String((init as RequestInit).body)) as Record<string, string>;
+      return jsonResponse({ ok: true, result: { message_id: 7, date: 1 } });
+    };
+
+    await sendMessage({
+      token: 'T',
+      chatId: '@somechannel',
+      text: '📰 <b>عنوان</b>\n📝 جزئیات',
+      parseMode: 'HTML',
+      fetchImpl,
+      baseUrl: 'https://api.test',
+    });
+
+    expect(body?.parse_mode).toBe('HTML');
+    expect(body?.text).toContain('<b>عنوان</b>');
+  });
+
+  it('sends a structured RTL Rich Messages document', async () => {
+    let body: Record<string, unknown> | undefined;
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      body = JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>;
+      return jsonResponse({ ok: true, result: { message_id: 8, date: 1 } });
+    };
+
+    await sendRichMessage({
+      token: 'T',
+      chatId: '@somechannel',
+      richMessage: {
+        html: '💻 <b>عنوان</b><br>📝 جزئیات',
+        is_rtl: true,
+        skip_entity_detection: true,
+      },
+      fetchImpl,
+      baseUrl: 'https://api.test',
+    });
+
+    expect(body?.rich_message).toEqual({
+      html: '💻 <b>عنوان</b><br>📝 جزئیات',
+      is_rtl: true,
+      skip_entity_detection: true,
+    });
   });
 
   it('throws TelegramError(400) when the username is unknown', async () => {

@@ -470,12 +470,13 @@ describe('title and summary are shared between image and digest', () => {
     expect(typeof runPublishing).toBe('function');
   });
 
-  it('keeps the legacy summary-only format for rows without a title', async () => {
+  it('keeps legacy rows readable with rich formatting when no title exists', async () => {
     const { buildChannelDigest } = await import('../src/publisher');
     const parts = buildChannelDigest('channel_alpha', '@destination', [
       { id: 1, summaryText: 'خلاصهٔ خبر.', title: null },
     ]);
-    expect(parts[0].text).toBe('خلاصهٔ خبر.\n\nمنبع: @channel_alpha\n@destination');
+    expect(parts[0].text).toContain('📰 <b>خبر عمومی</b>\n📝 <b>خلاصه:</b> خلاصهٔ خبر.');
+    expect(parts[0].text).toContain('📡 <i>منبع: @channel_alpha</i>\n📣 <i>@destination</i>');
   });
 });
 

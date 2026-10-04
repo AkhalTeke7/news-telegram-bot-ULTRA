@@ -22,7 +22,8 @@
     "secret:put:tgwebhook": "wrangler secret put TELEGRAM_WEBHOOK_SECRET"
   },
   "dependencies": {
-    "hono": "^4.13.12"
+    "hono": "^4.13.12",
+    "tg-rich-messages": "^0.4.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
