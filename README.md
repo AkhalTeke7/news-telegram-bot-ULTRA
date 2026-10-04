@@ -4,10 +4,10 @@ Persian (Farsi) RTL news bot on Cloudflare Workers. Every two hours it collects 
 Telegram channels and configured RSS feeds, filters advertisements, summarizes and ranks
 stories with **free OpenRouter models only**, renders the run as a Vazirmatn HTML
 screenshot with Cloudflare Browser Run (top-4 news as cards plus every remaining headline
-in a one-line ticker), and publishes high-resolution images plus HTML-formatted text digests to
-Telegram and, when configured, mirrors the same rich output to Bale. Digest headlines use the AI
-topic category for a related emoji, and every story includes its title, summary details, and
-available key points.
+in a one-line ticker), and publishes high-resolution images plus Telegram Rich Messages text
+digests to Telegram and, when configured, mirrors the same rich HTML output to Bale. Digest
+headlines use the AI topic category for a related emoji, and every story includes its title,
+summary details, and available key points.
 
 RSS sources currently include BBC Persian, Zoomit, Mobile.ir, and IRIB News. No paid
 models, MTProto, or committed credentials are required. Chat completions run through
@@ -22,7 +22,7 @@ Cron (every two hours, at even Tehran hours)
   └─ summarize → POST https://openrouter.ai/api/v1/chat/completions → summary_text + title
   └─ rank      → one global AI comparison        → importance (1–5)
   └─ publish   → Browser Run HTML screenshot + Telegram/Bale sendPhoto (important news)
-             └─ text digest → Telegram/Bale sendMessage
+             └─ text digest → Telegram sendRichMessage / Bale sendMessage
 ```
 
 Each stage is isolated: one failing channel, message, or model never stops the rest.
@@ -183,11 +183,14 @@ the destination appear only once each, as publishing metadata in the footer:
 
 The publisher owns that metadata; the AI never writes it. The footer is produced by the
 publisher from the real source channel and `TELEGRAM_DESTINATION_CHANNEL` (which is
-normalized for display only — the actual `sendMessage` target is unchanged). A channel with
-no publishable news sends nothing. Channels are never merged. The message contains only the
-summaries and that footer — no post text, no message/database ids, no model name, no
-filter data, and **no URLs** (Eitaa, `t.me`, `telegram.me`, `www.`, bare domains or any other
-link is stripped before the AI ever sees it; see the filter section).
+normalized for display only — the actual Telegram target is unchanged). Telegram text is sent
+through the Rich Messages API as an RTL HTML document (`sendRichMessage`), with entity
+detection disabled so the already-escaped digest markup stays intact. Bale receives the same
+HTML through its ordinary HTML parse mode. A channel with no publishable news sends nothing.
+Channels are never merged. The message contains only the summaries and that footer — no post
+text, no message/database ids, no model name, no filter data, and **no URLs** (Eitaa, `t.me`,
+`telegram.me`, `www.`, bare domains or any other link is stripped before the AI ever sees it;
+see the filter section).
 
 Only Telegram's 4096-character limit can split a channel's output; the length calculation
 includes every summary, the blank lines and both footer lines. A summary is never cut to
@@ -229,6 +232,25 @@ the photo down;
 the PNG is immediately sent to the destination with Telegram `sendPhoto` (and mirrored
 to Bale when configured) and is not stored in D1 or R2. Image failure is isolated, so
 the ordinary per-channel text digests still publish.
+
+
+### Rich text transport and slideshow compatibility
+
+The text digest is built as escaped HTML and passed through the zero-runtime-dependency
+[`tg-rich-messages`](https://github.com/vdistortion/tg-rich-messages) builder. Telegram receives
+its `toInputRichMessage()` payload through `sendRichMessage`, including `is_rtl: true` and
+`skip_entity_detection: true`. If a deployment is still on a Bot API version that rejects the
+Rich Messages method, the publisher makes one compatibility fallback to ordinary
+`sendMessage` with `parse_mode: HTML`; network, rate-limit, and content errors are never
+silently retried.
+
+The library's `<tg-slideshow>` block is URL-backed media, while this Worker's Browser Run
+binding returns an ephemeral PNG buffer and the current publishing budget intentionally allows
+one render per run. Therefore the current safe presentation is one high-resolution run image
+plus the complete rich text digest, rather than pretending a local buffer is a public slideshow
+URL or making several Browser Run calls inside the per-channel loop. A real Telegram album can
+be added once the deployment has durable public image URLs (or an explicitly expanded Browser
+Run budget) and can then use `sendMediaGroup` without dropping any digest details.
 
 ## Advertisement filter
 

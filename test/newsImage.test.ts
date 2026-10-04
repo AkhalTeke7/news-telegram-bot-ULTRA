@@ -103,9 +103,13 @@ function harness(opts: { png?: ArrayBuffer; sendStatus?: number } = {}) {
         { status, headers: { 'content-type': 'application/json' } }
       );
     }
-    if (href.includes('sendMessage')) {
+    if (href.includes('sendMessage') || href.includes('sendRichMessage')) {
       order.push('sendMessage');
-      texts.push(JSON.parse(String(init.body)).text);
+      const body = JSON.parse(String(init.body)) as {
+        text?: string;
+        rich_message?: { html?: string };
+      };
+      texts.push(body.text ?? body.rich_message?.html ?? '');
       return new Response(JSON.stringify({ ok: true, result: { message_id: ++messageId } }), {
         status: 200,
         headers: { 'content-type': 'application/json' },

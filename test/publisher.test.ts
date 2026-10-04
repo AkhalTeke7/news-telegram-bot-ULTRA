@@ -62,11 +62,15 @@ async function seedNews(
 function telegramRecorder(ok: (text: string) => boolean = () => true, status = 200) {
   const sent: { text: string; messageId: number }[] = [];
   const fetchImpl = vi.fn(async (_url: unknown, init: RequestInit) => {
-    const body = JSON.parse(String(init.body)) as { text: string };
-    if (!ok(body.text)) {
+    const body = JSON.parse(String(init.body)) as {
+      text?: string;
+      rich_message?: { html?: string };
+    };
+    const text = body.text ?? body.rich_message?.html ?? '';
+    if (!ok(text)) {
       return new Response(JSON.stringify({ ok: false, description: 'Bad Request' }), { status });
     }
-    sent.push({ text: body.text, messageId: 1000 + sent.length });
+    sent.push({ text, messageId: 1000 + sent.length });
     return new Response(JSON.stringify({ ok: true, result: { message_id: 1000 + sent.length, date: 1 } }), {
       status: 200,
     });
