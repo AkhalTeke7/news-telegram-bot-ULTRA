@@ -223,9 +223,12 @@ export function buildImageHtml(frame: ImageFrame): string {
       linear-gradient(135deg,#e8edf8 0%,#dfe5f1 42%,#eef1ed 100%);}
   .particles{position:absolute;inset:0}
   .particles i{position:absolute;border-radius:50%;display:block}
-  .frame{position:relative;width:${IMAGE_WIDTH}px;height:${IMAGE_HEIGHT}px;padding:96px 130px 0;display:flex;flex-direction:column}
-  .head{display:flex;justify-content:space-between;align-items:flex-start}
-  .head h1{font-size:62px;font-weight:800;line-height:1.15;color:#202838}
+  .frame{position:relative;width:${IMAGE_WIDTH}px;height:${IMAGE_HEIGHT}px;padding:72px 78px 0;display:flex;flex-direction:column}
+  .frame::before{content:'';position:absolute;inset:168px 28px 34px;border-radius:42px;
+    background:rgba(255,255,255,.38);border:2px solid rgba(255,255,255,.72);
+    box-shadow:0 24px 70px rgba(63,94,251,.12),inset 0 1px 0 rgba(255,255,255,.88);z-index:-1}
+  .head{display:flex;justify-content:space-between;align-items:flex-start;padding:0 18px}
+  .head h1{font-size:58px;font-weight:800;line-height:1.15;color:#202838;letter-spacing:-1px}
   .kicker{font-size:30px;font-weight:500;color:#6e7483;margin-top:10px}
   .pill{display:flex;align-items:center;gap:26px;padding:26px 40px;border-radius:52px;
     background:linear-gradient(180deg,rgba(255,255,255,.78),rgba(255,255,255,.42));
@@ -233,13 +236,13 @@ export function buildImageHtml(frame: ImageFrame): string {
   .pill .time{font-weight:700;color:#8e54bf}
   .rule{height:2px;margin-top:42px;border-radius:1px;
     background:linear-gradient(90deg,transparent,#8e54bf 42%,#fc466b 72%,transparent)}
-  .grid{flex:1;display:grid;gap:20px;padding:24px 0 0;min-height:0}
+  .grid{flex:1;display:grid;gap:22px;padding:28px 28px 0;min-height:0}
   .grid.one{grid-template-columns:1fr;grid-template-rows:1fr}
   .grid.two{grid-template-columns:1fr 1fr;grid-template-rows:1fr}
   .grid.three{grid-template-columns:1fr 1fr;grid-template-rows:auto 1fr}
   .grid.three .card:first-child{grid-column:1/-1}
   .grid.four{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
-  .card{position:relative;overflow:hidden;border-radius:34px;padding:28px 44px 28px 56px;
+  .card{position:relative;overflow:hidden;border-radius:28px;padding:30px 40px 30px 52px;
     background:linear-gradient(180deg,rgba(255,255,255,.82),rgba(255,255,255,.48));
     border:2px solid rgba(255,255,255,.86);
     box-shadow:0 18px 42px rgba(63,94,251,.13), inset 0 1px 0 rgba(255,255,255,.9);
@@ -250,13 +253,13 @@ export function buildImageHtml(frame: ImageFrame): string {
     background:var(--accent);opacity:.75}
   .card .src{position:relative;font-size:24px;font-weight:600;color:#3f5efb;direction:ltr;
     text-align:right;letter-spacing:.5px}
-  .card h2{position:relative;font-size:44px;font-weight:800;line-height:1.32;color:#202838}
-  .card p{position:relative;font-size:29px;font-weight:400;line-height:1.45;color:#596274;opacity:.93}
-  .foot{padding:24px 0 38px;font-size:32px;font-weight:600;color:#596274;text-align:right}
+  .card h2{position:relative;font-size:40px;font-weight:800;line-height:1.32;color:#202838}
+  .card p{position:relative;font-size:27px;font-weight:400;line-height:1.45;color:#596274;opacity:.93}
+  .foot{padding:22px 28px 34px;font-size:28px;font-weight:600;color:#596274;text-align:right}
 </style>
 </head>
 <body>
-  <div class="particles">${particles(78, 0x5eed1234)}</div>
+  <div class="particles">${particles(14, 0x5eed1234)}</div>
   <div class="frame">
     <div class="head">
       <div>
