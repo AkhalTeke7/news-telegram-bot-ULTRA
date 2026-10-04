@@ -34,6 +34,17 @@ after its work is persisted.
 - An OpenCode/Zen API key
 - A Cloudflare Browser binding for image generation
 
+## 0. Install dependencies
+
+```bash
+npm install          # or: npm ci — installs exactly what package-lock.json pins
+```
+
+Do this in every fresh clone **before** any `wrangler` command that bundles code
+(`deploy`, `dev`, `build`). `npx` fetches Wrangler itself on demand but never installs
+the project's own dependencies (`hono`), so skipping this step fails the build with
+`✘ [ERROR] Could not resolve "hono"` — see [Troubleshooting](#troubleshooting).
+
 ## 1. D1 database
 
 ```bash
@@ -277,14 +288,36 @@ npm run build     # wrangler dry-run bundle into dist/
 
 ## 5. Deploy
 
-After all development and QA are complete:
+Production deploy, in order. Sections 1–3 (D1 database, Telegram bot, secrets) must be
+done once before the first deploy, and every fresh clone needs `npm install` first
+(section 0).
 
 ```bash
+# 1) Install dependencies — REQUIRED before deploy. Skipping this fails the build
+#    with "Could not resolve hono" (see Troubleshooting).
+npm install                              # or: npm ci for a clean lockfile install
+
+# 2) Apply migrations to the remote (production) D1 database.
+#    On later deploys only needed when new migrations were added.
 npx wrangler d1 migrations apply news-bot --remote
+
+# 3) Deploy the Worker. On success Wrangler prints the live URL, e.g.
+#    https://news-telegram-bot.<your-subdomain>.workers.dev
 npx wrangler deploy
 ```
 
-Then register the Telegram webhook once (values come from the two Telegram secrets):
+> `npm run deploy` is equivalent to step 3 and safe to run from a fresh clone: its
+> `predeploy` hook runs `npm install` first.
+
+Optional checks before or after deploying:
+
+```bash
+npm run typecheck    # tsc --noEmit
+npm run build        # wrangler deploy --dry-run — bundles into dist/, uploads nothing
+curl https://<your-worker-domain>/healthz
+```
+
+### Register the Telegram webhook (once, after the first deploy)
 
 ```bash
 curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
@@ -293,10 +326,52 @@ curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
   -d allowed_updates='["message","callback_query"]'
 ```
 
+`<your-worker-domain>` is the URL Wrangler printed in step 3. Verify with
+`getWebhookInfo`; re-run `setWebhook` only if the Worker URL changes.
+
+### Endpoints after deploy
+
 The Worker exposes the admin panel at `/` (Persian RTL), `GET /healthz`, the exact
 renderer preview at `GET /preview/news-image`, the Telegram webhook at
 `POST /api/telegram/webhook`, and an authenticated `GET /api/status`
 diagnostics endpoint. Everything else under `/api` requires the admin session cookie.
+
+## Troubleshooting
+
+### Build fails with `Could not resolve "hono"`
+
+```
+✘ [ERROR] Build failed with 1 error:
+
+  ✘ [ERROR] Could not resolve "hono"
+
+      src/api.ts:1:21:
+        1 │ import { Hono } from 'hono';
+```
+
+**Cause:** `node_modules/` is missing or incomplete — the command ran before
+`npm install`. `npx wrangler …` downloads Wrangler itself on demand, but it does **not**
+install the dependencies declared in `package.json` (`hono` is a runtime dependency).
+The `"alias"` suggestion in Wrangler's error output is a red herring here — do not add
+an alias entry.
+
+**Fix:**
+
+```bash
+npm install
+npx wrangler deploy
+```
+
+If `node_modules/` exists but is stale or half-installed, do a clean reinstall:
+
+```bash
+rm -rf node_modules && npm ci
+```
+
+Also check that Node.js is ≥ 20 (`node --version`) and that you are in the repository
+root next to `wrangler.json`. If you deploy through Cloudflare's Git integration or
+another CI pipeline, make sure the build command installs dependencies
+(`npm ci` or `npm install`) before `npx wrangler deploy`.
 
 ## Admin API
 

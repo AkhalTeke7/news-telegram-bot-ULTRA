@@ -6,6 +6,7 @@
   "description": "Persian RTL Telegram news summarizer bot on Cloudflare Workers",
   "scripts": {
     "dev": "wrangler dev",
+    "predeploy": "npm install",
     "deploy": "wrangler deploy",
     "build": "wrangler deploy --dry-run --outdir dist",
     "typecheck": "tsc --noEmit",
