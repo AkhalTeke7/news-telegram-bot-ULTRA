@@ -194,7 +194,7 @@ export function buildImageHtml(frame: ImageFrame): string {
   const cards = frame.items
     .map(
       (item, i) => `<article class="card" style="--accent:${
-        ['#4f8cff', '#22d3ee', '#a78bfa', '#34d399'][i % 4]
+        ['#3f5efb', '#8e54bf', '#fc466b', '#43b89c'][i % 4]
       }">
         <div class="src">@${esc(item.channelUsername)}</div>
         <h2>${esc(item.title)}</h2>
@@ -216,23 +216,23 @@ export function buildImageHtml(frame: ImageFrame): string {
     src:url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/webfonts/Vazirmatn-Bold.woff2') format('woff2');}
   *{margin:0;padding:0;box-sizing:border-box}
   html,body{width:${IMAGE_WIDTH}px;height:${IMAGE_HEIGHT}px;overflow:hidden}
-  body{font-family:'Vazirmatn',system-ui,sans-serif;color:#fff;position:relative;
+  body{font-family:'Vazirmatn',system-ui,sans-serif;color:#1d2433;position:relative;
     background:
-      radial-gradient(ellipse 62% 62% at 82% 8%, rgba(37,99,235,.42), transparent 70%),
-      radial-gradient(ellipse 60% 60% at 12% 95%, rgba(124,58,237,.34), transparent 70%),
-      linear-gradient(135deg,#04060f 0%,#0a1230 45%,#120c28 100%);}
+      radial-gradient(circle at 10% 8%, rgba(252,70,107,.20), transparent 28%),
+      radial-gradient(circle at 92% 88%, rgba(63,94,251,.24), transparent 34%),
+      linear-gradient(135deg,#e8edf8 0%,#dfe5f1 42%,#eef1ed 100%);}
   .particles{position:absolute;inset:0}
   .particles i{position:absolute;border-radius:50%;display:block}
   .frame{position:relative;width:${IMAGE_WIDTH}px;height:${IMAGE_HEIGHT}px;padding:96px 130px 0;display:flex;flex-direction:column}
   .head{display:flex;justify-content:space-between;align-items:flex-start}
-  .head h1{font-size:62px;font-weight:800;line-height:1.15}
-  .kicker{font-size:30px;font-weight:500;color:#9fb6d4;margin-top:10px}
+  .head h1{font-size:62px;font-weight:800;line-height:1.15;color:#202838}
+  .kicker{font-size:30px;font-weight:500;color:#6e7483;margin-top:10px}
   .pill{display:flex;align-items:center;gap:26px;padding:26px 40px;border-radius:52px;
-    background:linear-gradient(180deg,rgba(255,255,255,.15),rgba(255,255,255,.055));
-    border:2px solid rgba(255,255,255,.26);font-size:32px;font-weight:600}
-  .pill .time{font-weight:700;color:#7dd3fc}
+    background:linear-gradient(180deg,rgba(255,255,255,.78),rgba(255,255,255,.42));
+    border:2px solid rgba(255,255,255,.82);font-size:32px;font-weight:600;color:#343b4a;box-shadow:0 14px 32px rgba(63,94,251,.12)}
+  .pill .time{font-weight:700;color:#8e54bf}
   .rule{height:2px;margin-top:42px;border-radius:1px;
-    background:linear-gradient(90deg,transparent,#4f8cff 50%,transparent)}
+    background:linear-gradient(90deg,transparent,#8e54bf 42%,#fc466b 72%,transparent)}
   .grid{flex:1;display:grid;gap:20px;padding:24px 0 0;min-height:0}
   .grid.one{grid-template-columns:1fr;grid-template-rows:1fr}
   .grid.two{grid-template-columns:1fr 1fr;grid-template-rows:1fr}
@@ -240,18 +240,19 @@ export function buildImageHtml(frame: ImageFrame): string {
   .grid.three .card:first-child{grid-column:1/-1}
   .grid.four{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
   .card{position:relative;overflow:hidden;border-radius:34px;padding:28px 44px 28px 56px;
-    background:linear-gradient(180deg,rgba(255,255,255,.15),rgba(255,255,255,.055));
-    border:2px solid rgba(255,255,255,.30);
+    background:linear-gradient(180deg,rgba(255,255,255,.82),rgba(255,255,255,.48));
+    border:2px solid rgba(255,255,255,.86);
+    box-shadow:0 18px 42px rgba(63,94,251,.13), inset 0 1px 0 rgba(255,255,255,.9);
     display:flex;flex-direction:column;justify-content:center;gap:12px}
   .card::before{content:'';position:absolute;inset:0 0 auto 0;height:40%;
-    background:linear-gradient(180deg,rgba(255,255,255,.10),transparent);pointer-events:none}
+    background:linear-gradient(180deg,rgba(255,255,255,.55),transparent);pointer-events:none}
   .card::after{content:'';position:absolute;top:22%;bottom:22%;right:0;width:5px;border-radius:3px;
     background:var(--accent);opacity:.75}
-  .card .src{position:relative;font-size:24px;font-weight:600;color:#7dd3fc;direction:ltr;
+  .card .src{position:relative;font-size:24px;font-weight:600;color:#3f5efb;direction:ltr;
     text-align:right;letter-spacing:.5px}
-  .card h2{position:relative;font-size:44px;font-weight:800;line-height:1.32}
-  .card p{position:relative;font-size:29px;font-weight:400;line-height:1.45;color:#d7e6f7;opacity:.93}
-  .foot{padding:24px 0 38px;font-size:32px;font-weight:600;color:#cfe0f5;text-align:right}
+  .card h2{position:relative;font-size:44px;font-weight:800;line-height:1.32;color:#202838}
+  .card p{position:relative;font-size:29px;font-weight:400;line-height:1.45;color:#596274;opacity:.93}
+  .foot{padding:24px 0 38px;font-size:32px;font-weight:600;color:#596274;text-align:right}
 </style>
 </head>
 <body>
