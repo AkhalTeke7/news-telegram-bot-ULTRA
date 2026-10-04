@@ -1,14 +1,24 @@
 /**
- * OpenCode Zen (OpenAI-compatible) client: live model discovery + summarization.
+ * OpenRouter (OpenAI-compatible) client: live model discovery + summarization.
  *
  * FREE-ONLY RULE: a model is usable only when the API states it is free, either
- * through explicit pricing metadata (all prices 0) or an explicit free flag.
- * When the API exposes no pricing metadata at all, a strict "-free" id suffix
- * is the only fallback used. A model with unknown pricing is never selected, and
- * there is no paid fallback anywhere in this file.
+ * through explicit pricing metadata (every discovered price 0) or an explicit
+ * free flag. When the API exposes no pricing metadata at all, a strict id
+ * suffix is the only fallback used: OpenRouter's ":free" convention (e.g.
+ * "meta-llama/llama-3.3-70b-instruct:free") plus the legacy "-free". A model
+ * with unknown pricing is never selected, and there is no paid fallback
+ * anywhere in this file.
+ *
+ * OpenRouter's model list prices are STRINGS ("0", "0.000001"), not numbers,
+ * so readPrices() accepts both shapes.
+ *
+ * AUTH: the key is sent only as `Authorization: Bearer <key>` and is read from
+ * OPENROUTER_API_KEY, falling back to the legacy OPENCODE_API_KEY secret name
+ * (see resolveAiApiKey) so deployments that stored an OpenRouter key under the
+ * old name keep working unchanged.
  */
 
-export const OPENCODE_BASE_URL = 'https://opencode.ai/zen/v1';
+export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 export const MODEL_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const MODEL_LIST_TIMEOUT_MS = 15_000;
 
@@ -48,8 +58,32 @@ export interface FetchOptions {
   timeoutMs?: number;
 }
 
-const asNumber = (value: unknown): number | null =>
-  typeof value === 'number' && Number.isFinite(value) ? value : null;
+/**
+ * Reads the chat-completions API key from the environment.
+ *
+ * OPENROUTER_API_KEY is the preferred secret name; OPENCODE_API_KEY is still
+ * read as a legacy alias so deployments that already stored an OpenRouter key
+ * under the old name keep working with no re-configuration.
+ */
+export function resolveAiApiKey(env: {
+  OPENROUTER_API_KEY?: string;
+  OPENCODE_API_KEY?: string;
+}): string | undefined {
+  return env.OPENROUTER_API_KEY?.trim() || env.OPENCODE_API_KEY?.trim() || undefined;
+}
+
+/**
+ * Accepts numbers and numeric strings: OpenRouter prices models as strings
+ * ("0", "0.000001"), other providers as plain numbers.
+ */
+const asNumber = (value: unknown): number | null => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+};
 
 /**
  * Pulls every price the entry exposes. Different deployments name these
@@ -94,8 +128,11 @@ function hasFreeFlag(entry: Record<string, unknown>): boolean {
   return entry.free === true || entry.is_free === true || entry.isFree === true;
 }
 
-/** Strict, anchored suffix test. Only applied when no pricing exists at all. */
-const FREE_ID_SUFFIX = /-free$/i;
+/**
+ * Strict, anchored suffix test. Only applied when no pricing exists at all.
+ * ":free" is OpenRouter's convention; "-free" is kept for compatibility.
+ */
+const FREE_ID_SUFFIX = /[-:]free$/i;
 
 function extractEntries(payload: unknown): unknown[] {
   if (Array.isArray(payload)) return payload;
@@ -109,12 +146,12 @@ function extractEntries(payload: unknown): unknown[] {
 }
 
 /**
- * Fetches https://opencode.ai/zen/v1/models and returns only FREE models.
+ * Fetches https://openrouter.ai/api/v1/models and returns only FREE models.
  * Throws AiError on transport/shape failures; never returns a paid model.
  */
 export async function discoverFreeModels(opts: FetchOptions = {}): Promise<ModelDiscovery> {
   const doFetch = opts.fetchImpl ?? fetch;
-  const base = opts.baseUrl ?? OPENCODE_BASE_URL;
+  const base = opts.baseUrl ?? OPENROUTER_BASE_URL;
 
   let payload: unknown;
   try {
@@ -267,7 +304,7 @@ const MAX_SOURCE_CHARS = 6000;
  */
 export async function summarizeNews(opts: SummarizeOptions): Promise<SummaryResult> {
   if (!opts.apiKey) {
-    throw new AiError('config_missing', 'OPENCODE_API_KEY is not configured.');
+    throw new AiError('config_missing', 'OPENROUTER_API_KEY is not configured.');
   }
   if (!opts.model) {
     throw new AiError('no_free_model', 'No free model selected.');
@@ -418,7 +455,7 @@ export interface RankOptions extends FetchOptions {
  * channel identity, no URLs, no ids, no credentials.
  */
 export async function rankNewsItems(opts: RankOptions): Promise<RankedItem[]> {
-  if (!opts.apiKey) throw new AiError('config_missing', 'OPENCODE_API_KEY is not configured.');
+  if (!opts.apiKey) throw new AiError('config_missing', 'OPENROUTER_API_KEY is not configured.');
   if (!opts.model) throw new AiError('no_free_model', 'No free model selected.');
   if (opts.items.length === 0) return [];
 
@@ -490,7 +527,7 @@ async function complete(
   maxTokens: number
 ): Promise<string> {
   const doFetch = opts.fetchImpl ?? fetch;
-  const base = opts.baseUrl ?? OPENCODE_BASE_URL;
+  const base = opts.baseUrl ?? OPENROUTER_BASE_URL;
   const body = {
     model: opts.model,
     temperature: 0.2,
@@ -509,6 +546,8 @@ async function complete(
         'content-type': 'application/json',
         accept: 'application/json',
         authorization: `Bearer ${opts.apiKey}`,
+        // Optional OpenRouter attribution; harmless on other providers.
+        'x-title': 'news-telegram-bot',
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000),

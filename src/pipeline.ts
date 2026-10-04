@@ -13,6 +13,7 @@ import { deriveCronStatus, finishCronRun, startCronRun, type CronStatus } from '
 import { runImportanceRanking } from './newsRanking';
 import { collectRss } from './rssCollector';
 import { resolveBaleDelivery, resolveDestination, runPublishing } from './publisher';
+import { resolveAiApiKey } from './openrouter';
 import { runSummarization } from './summarizer';
 import type { Env } from './types';
 
@@ -33,7 +34,7 @@ export interface PipelineOutcome {
   /** Stage-level errors only; each is a short, secret-free message. */
   errors: string[];
   collection: { enabledChannels: number; succeeded: number; failed: number; inserted: number } | null;
-  /** Advertisements blocked before any OpenCode call. */
+  /** Advertisements blocked before any OpenRouter call. */
   filteredAdvertisements: number;
   filter: { checked: number; filtered: number; passed: number } | null;
   summarization: { eligible: number; summarized: number; failed: number; model: string | null } | null;
@@ -88,15 +89,15 @@ export async function runNewsPipeline(
       inserted: telegram.inserted + rss.inserted,
     };
   });
-  // Local, offline filter. Runs before any OpenCode request is made.
+  // Local, offline filter. Runs before any OpenRouter request is made.
   const filter = await stage('filter', () => filterPendingMessages(db));
   const summarization = await stage('summarize', () =>
-    runSummarization(db, { apiKey: env.OPENCODE_API_KEY })
+    runSummarization(db, { apiKey: resolveAiApiKey(env) })
   );
   // Global importance ranking across every channel, once per run. Never throws:
   // a failure leaves importance untouched and publishing continues.
   const ranking = await stage('rank', () =>
-    runImportanceRanking(db, { apiKey: env.OPENCODE_API_KEY })
+    runImportanceRanking(db, { apiKey: resolveAiApiKey(env) })
   );
   const publishing = await stage('publish', () =>
     runPublishing(db, {

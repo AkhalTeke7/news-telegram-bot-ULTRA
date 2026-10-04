@@ -1,7 +1,7 @@
 /**
  * Deterministic, local advertisement / spam filter.
  *
- * Runs entirely in the Worker before any OpenCode call. No network requests, no
+ * Runs entirely in the Worker before any OpenRouter call. No network requests, no
  * AI, no DNS: every decision is a pure function of the post text, so the same
  * input always produces the same verdict.
  *

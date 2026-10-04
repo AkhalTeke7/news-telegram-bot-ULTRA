@@ -8,6 +8,9 @@ import cronRunsSql from '../migrations/0005_cron_runs.sql?raw';
 import telegramAdminSql from '../migrations/0006_telegram_admin.sql?raw';
 import adFilterSql from '../migrations/0007_ad_filter.sql?raw';
 import titleImportanceSql from '../migrations/0008_title_importance.sql?raw';
+import editorialSql from '../migrations/0009_ai_editorial_metadata.sql?raw';
+import rssSourcesSql from '../migrations/0010_rss_sources.sql?raw';
+import rssChannelSql from '../migrations/0011_rss_channel_metadata.sql?raw';
 
 // ponytail: strips `--` comments, then splits on `;`. Still assumes no
 // semicolons inside string literals in migration files; add a real SQL splitter
@@ -29,5 +32,13 @@ beforeAll(async () => {
     { name: '0006_telegram_admin.sql', queries: toQueries(telegramAdminSql) },
     { name: '0007_ad_filter.sql', queries: toQueries(adFilterSql) },
     { name: '0008_title_importance.sql', queries: toQueries(titleImportanceSql) },
+    { name: '0009_ai_editorial_metadata.sql', queries: toQueries(editorialSql) },
+    { name: '0010_rss_sources.sql', queries: toQueries(rssSourcesSql) },
+    { name: '0011_rss_channel_metadata.sql', queries: toQueries(rssChannelSql) },
   ]);
+
+  // Migration 0010 seeds default RSS sources (BBC Persian, ...). They must stay
+  // disabled in tests: the suite is network-free, and an enabled source would
+  // make every pipeline run record offline fetch failures (status 'partial').
+  await env.DB.prepare(`UPDATE rss_sources SET enabled = 0`).run();
 });

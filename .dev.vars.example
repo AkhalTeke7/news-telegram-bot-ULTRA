@@ -4,8 +4,11 @@ ADMIN_PASSWORD="change-me-long-random-password"
 TELEGRAM_BOT_TOKEN="123456789:replace-with-botfather-token"
 # Optional Bale token. For production use: npx wrangler secret put BALE_BOT_TOKEN
 BALE_BOT_TOKEN=""
-# OpenCode Zen key (https://opencode.ai). Server-side only.
-# For the deployed Worker use: npx wrangler secret put OPENCODE_API_KEY
+# OpenRouter API key (https://openrouter.ai). Server-side only.
+# For the deployed Worker use: npx wrangler secret put OPENROUTER_API_KEY
+OPENROUTER_API_KEY=""
+# Legacy alias from the OpenCode era - still read as a fallback, so a key
+# stored under the old name keeps working.
 OPENCODE_API_KEY=""
 # Phase 4 destination chat: "@channel_username" or "-1001234567890".
 # Server-side only; not configurable through the UI or API.

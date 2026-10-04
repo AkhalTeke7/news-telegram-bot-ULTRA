@@ -1,5 +1,5 @@
 /**
- * Summarizes collected messages with a FREE OpenCode model.
+ * Summarizes collected messages with a FREE OpenRouter model.
  *
  * Safety properties:
  *  - a message is only marked summarized after its summary is persisted
@@ -8,7 +8,7 @@
  *    ever falling back to a paid model
  */
 
-import { AiError, categorize, summarizeNews } from './opencode';
+import { AiError, categorize, summarizeNews } from './openrouter';
 import { stripExternalIdentifiers } from './adFilter';
 import { recordModelFailure, resolveFreeModel } from './modelManager';
 import { DEFAULT_WINDOW_MS } from './collector';

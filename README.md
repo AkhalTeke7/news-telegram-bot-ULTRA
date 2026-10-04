@@ -2,13 +2,14 @@
 
 Persian (Farsi) RTL news bot on Cloudflare Workers. Every two hours it collects news from public
 Telegram channels and configured RSS feeds, filters advertisements, summarizes and ranks
-stories with **free OpenCode/Zen models only**, renders the run as a Vazirmatn HTML
+stories with **free OpenRouter models only**, renders the run as a Vazirmatn HTML
 screenshot with Cloudflare Browser Run (top-4 news as cards plus every remaining headline
 in a one-line ticker), and publishes text and images to Telegram and, when configured,
 mirrors the same output to Bale.
 
 RSS sources currently include BBC Persian, Zoomit, Mobile.ir, and IRIB News. No paid
-models, MTProto, OpenRouter, or committed credentials are required.
+models, MTProto, or committed credentials are required. Chat completions run through
+the OpenRouter API using only its free models.
 
 ## Pipeline
 
@@ -16,7 +17,7 @@ models, MTProto, OpenRouter, or committed credentials are required.
 Cron (every two hours, at even Tehran hours)
   └─ collect   → Telegram previews + RSS feeds  → D1 `messages`   (2-hour window, deduped)
   └─ filter    → local advertisement filter      → filter_status    (no AI, no network)
-  └─ summarize → POST https://opencode.ai/zen/v1/chat/completions → summary_text + title
+  └─ summarize → POST https://openrouter.ai/api/v1/chat/completions → summary_text + title
   └─ rank      → one global AI comparison        → importance (1–5)
   └─ publish   → Browser Run HTML screenshot + Telegram/Bale sendPhoto (important news)
              └─ text digest → Telegram/Bale sendMessage
@@ -32,7 +33,7 @@ complete after its work is persisted.
 - A Cloudflare account
 - A Telegram bot that is **administrator of the destination channel** (optional if only Bale is used)
 - A Bale bot and destination channel (optional)
-- An OpenCode/Zen API key
+- An OpenRouter API key (https://openrouter.ai)
 - A Cloudflare Browser binding for image generation
 
 ## 0. Install dependencies
@@ -96,7 +97,8 @@ Never commit real values. Production secrets are set through Wrangler:
 npx wrangler secret put ADMIN_PASSWORD                 # admin panel password
 npx wrangler secret put TELEGRAM_BOT_TOKEN             # from BotFather
 npx wrangler secret put BALE_BOT_TOKEN                 # from Bale bot management
-npx wrangler secret put OPENCODE_API_KEY               # https://opencode.ai
+npx wrangler secret put OPENROUTER_API_KEY             # https://openrouter.ai
+# (legacy name still honored: a key stored as OPENCODE_API_KEY keeps working)
 npx wrangler secret put TELEGRAM_DESTINATION_CHANNEL   # @your_channel or -1001234567890
 npx wrangler secret put BALE_DESTINATION_CHANNEL       # @channel or numeric chat id
 npx wrangler secret put TELEGRAM_ADMIN_USER_ID         # numeric Telegram User.id
@@ -108,7 +110,8 @@ npx wrangler secret put TELEGRAM_WEBHOOK_SECRET        # X-Telegram-Bot-Api-Secr
 | `ADMIN_PASSWORD` | yes | Single-owner web admin login. Unlocks the session cookie. |
 | `TELEGRAM_BOT_TOKEN` | yes | Telegram Bot API: verify channels, publish summaries, and serve the Telegram admin UI. |
 | `BALE_BOT_TOKEN` | yes | Bale Business Bot API token used for Bale delivery. |
-| `OPENCODE_API_KEY` | yes | OpenCode/Zen chat completions. |
+| `OPENROUTER_API_KEY` | yes | OpenRouter chat completions (free models only). Preferred secret name. |
+| `OPENCODE_API_KEY` | legacy | Old secret name from the OpenCode era. Still read as an alias for `OPENROUTER_API_KEY`, so a key already stored under this name (e.g. an OpenRouter key saved as `OPENCODE_API_KEY`) works unchanged. |
 | `TELEGRAM_DESTINATION_CHANNEL` | yes (configuration, kept server-side) | Telegram destination: `@channel` or numeric id. |
 | `BALE_DESTINATION_CHANNEL` | yes (configuration, kept server-side) | Bale destination: `@channel` or numeric chat id. |
 | `TELEGRAM_ADMIN_USER_ID` | yes | Numeric Telegram `User.id` allowed to administer the bot over Telegram. |
@@ -184,7 +187,7 @@ without duplicating what already went out.
 
 ## AI importance and channel image
 
-After summaries are created, one global OpenCode ranking request compares eligible news
+After summaries are created, one global OpenRouter ranking request compares eligible news
 across all enabled source channels and stores an `importance` score from 1 to 5. Score 1
 means the item is not important enough for the visual; scores 2–5 are eligible. The
 ranking is persisted in D1, so image selection is deterministic and independent of
@@ -203,7 +206,7 @@ the ordinary per-channel text digests still publish.
 
 ## Advertisement filter
 
-Before any OpenCode call, every collected post is scored locally by `src/adFilter.ts`.
+Before any OpenRouter call, every collected post is scored locally by `src/adFilter.ts`.
 It is pure, offline and deterministic — no AI, no DNS, no HTTP — so the same text always
 gets the same verdict.
 
@@ -221,7 +224,7 @@ gets the same verdict.
 * Verdicts are persisted in `messages.filter_status` (`pending` / `filtered` / `passed`,
   enforced by a CHECK constraint) with a short Persian `filter_reason`. A message is
   scored exactly once, and filtered messages are excluded from both summarization and
-  publishing, so they never reach OpenCode and are never reconsidered on later runs.
+  publishing, so they never reach OpenRouter and are never reconsidered on later runs.
 * Before summarization the post body is also cleaned by `stripExternalIdentifiers()`:
   absolute URLs, `www.`, bare domains, shortened/tracking links, Telegram hosts
   (`t.me`, `telegram.me`, `telegram.dog`), Eitaa, social handles, invite/join links and
@@ -446,11 +449,13 @@ Write endpoints require `content-type: application/json` and the session cookie
 
 ## How free-model discovery works
 
-1. `GET https://opencode.ai/zen/v1/models` (no key needed for this endpoint).
+1. `GET https://openrouter.ai/api/v1/models` (no key needed for this endpoint).
 2. A model is usable **only** if the API says it is free:
-   - **pricing metadata present** → free only when every discovered input/output price is `0`.
+   - **pricing metadata present** → free only when every discovered price is `0`. OpenRouter
+     reports prices as strings (`"0"`), which are parsed; numbers are still accepted.
    - **no pricing, explicit `free: true`** → free.
-   - **no pricing and no flag** → only ids ending in `-free`; everything else is excluded.
+   - **no pricing and no flag** → only ids ending in `:free` (OpenRouter's convention, e.g.
+     `deepseek/deepseek-chat-v3-0324:free`) or the legacy `-free`; everything else is excluded.
    A model with unknown pricing is never selected.
 3. The free list is cached in `ai_settings` and refreshed at most once every 24 hours.
 4. On `rate_limited`/`provider_error` the failed model is excluded, the list is refreshed

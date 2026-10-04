@@ -4,9 +4,11 @@ import {
   AiError,
   categorize,
   discoverFreeModels,
+  OPENROUTER_BASE_URL,
+  resolveAiApiKey,
   sanitizeSummary,
   summarizeNews,
-} from '../src/opencode';
+} from '../src/openrouter';
 import { KEY_FREE_MODELS, KEY_REFRESHED_AT, KEY_SELECTED_MODEL, resolveFreeModel } from '../src/modelManager';
 import { markSummarized, runSummarization, selectEligibleMessages } from '../src/summarizer';
 import { getSetting } from '../src/settings';
@@ -47,6 +49,56 @@ async function seedMessage(channelId: number, id: number, text: string, minutesA
 }
 
 describe('free model discovery', () => {
+  it('targets the OpenRouter API by default', async () => {
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (url: unknown) => {
+      seen.push(String(url));
+      return new Response(JSON.stringify({ data: [] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await discoverFreeModels({ fetchImpl });
+    expect(seen).toEqual(['https://openrouter.ai/api/v1/models']);
+    expect(OPENROUTER_BASE_URL).toBe('https://openrouter.ai/api/v1');
+  });
+
+  it('accepts OpenRouter string prices: all-"0" is free, any non-zero is paid', async () => {
+    const fetchImpl = jsonFetch({
+      data: [
+        {
+          id: 'meta-llama/llama-3.3-70b-instruct:free',
+          pricing: { prompt: '0', completion: '0', request: '0', image: '0' },
+        },
+        {
+          id: 'openai/gpt-4o-mini',
+          pricing: { prompt: '0.000015', completion: '0.00006', request: '0' },
+        },
+        { id: 'mixed/pricing', pricing: { prompt: '0', completion: '0.000001' } },
+      ],
+    });
+
+    const result = await discoverFreeModels({ fetchImpl });
+    expect(result.strategy).toBe('pricing');
+    expect(result.freeModels).toEqual(['meta-llama/llama-3.3-70b-instruct:free']);
+    expect(result.skipped.paid).toBe(2);
+  });
+
+  it('falls back to the OpenRouter ":free" id suffix when no pricing exists', async () => {
+    const fetchImpl = jsonFetch({
+      data: [
+        { id: 'deepseek/deepseek-chat-v3-0324:free' },
+        { id: 'google/gemini-2.0-flash-exp:free' },
+        { id: 'anthropic/claude-3.7-sonnet' },
+        { id: 'legacy/space-bunny-free' },
+      ],
+    });
+    const result = await discoverFreeModels({ fetchImpl });
+    expect(result.strategy).toBe('name-suffix');
+    expect(result.freeModels).toEqual([
+      'deepseek/deepseek-chat-v3-0324:free',
+      'google/gemini-2.0-flash-exp:free',
+      'legacy/space-bunny-free',
+    ]);
+  });
+
   it('uses explicit zero pricing when the API provides it', async () => {
     const fetchImpl = jsonFetch({
       object: 'list',
@@ -132,6 +184,22 @@ describe('free model discovery', () => {
     await expect(discoverFreeModels({ fetchImpl: boom })).rejects.toMatchObject({
       category: 'network',
     });
+  });
+});
+
+describe('resolveAiApiKey', () => {
+  it('prefers OPENROUTER_API_KEY', () => {
+    expect(
+      resolveAiApiKey({ OPENROUTER_API_KEY: ' new-key ', OPENCODE_API_KEY: 'old-key' })
+    ).toBe('new-key');
+  });
+
+  it('falls back to the legacy OPENCODE_API_KEY name', () => {
+    expect(resolveAiApiKey({ OPENCODE_API_KEY: 'stored-under-old-name' })).toBe(
+      'stored-under-old-name'
+    );
+    expect(resolveAiApiKey({})).toBeUndefined();
+    expect(resolveAiApiKey({ OPENROUTER_API_KEY: '   ', OPENCODE_API_KEY: '' })).toBeUndefined();
   });
 });
 

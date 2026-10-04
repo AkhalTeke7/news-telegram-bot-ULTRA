@@ -2,7 +2,7 @@ import { env } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import { sendMessage } from '../src/telegram';
 import { fetchChannelPreview, PREVIEW_TIMEOUT_MS } from '../src/telegramPreview';
-import { discoverFreeModels, MODEL_LIST_TIMEOUT_MS } from '../src/opencode';
+import { discoverFreeModels, MODEL_LIST_TIMEOUT_MS } from '../src/openrouter';
 import { collectAll } from '../src/collector';
 
 /**

@@ -15,6 +15,7 @@
     "db:migrate:remote": "wrangler d1 migrations apply news-bot --remote",
     "secret:put:bot": "wrangler secret put TELEGRAM_BOT_TOKEN",
     "secret:put:admin": "wrangler secret put ADMIN_PASSWORD",
+    "secret:put:openrouter": "wrangler secret put OPENROUTER_API_KEY",
     "secret:put:opencode": "wrangler secret put OPENCODE_API_KEY",
     "secret:put:destination": "wrangler secret put TELEGRAM_DESTINATION_CHANNEL",
     "secret:put:tgadmin": "wrangler secret put TELEGRAM_ADMIN_USER_ID",
