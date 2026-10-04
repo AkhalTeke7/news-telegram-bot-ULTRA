@@ -1,0 +1,32 @@
+{
+  "name": "news-telegram-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Persian RTL Telegram news summarizer bot on Cloudflare Workers",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:migrate:local": "wrangler d1 migrations apply news-bot --local",
+    "db:migrate:remote": "wrangler d1 migrations apply news-bot --remote",
+    "secret:put:bot": "wrangler secret put TELEGRAM_BOT_TOKEN",
+    "secret:put:admin": "wrangler secret put ADMIN_PASSWORD",
+    "secret:put:opencode": "wrangler secret put OPENCODE_API_KEY",
+    "secret:put:destination": "wrangler secret put TELEGRAM_DESTINATION_CHANNEL",
+    "secret:put:tgadmin": "wrangler secret put TELEGRAM_ADMIN_USER_ID",
+    "secret:put:tgwebhook": "wrangler secret put TELEGRAM_WEBHOOK_SECRET"
+  },
+  "dependencies": {
+    "hono": "^4.13.12"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20261002.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.147.0"
+  }
+}
