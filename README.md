@@ -2,9 +2,10 @@
 
 Persian (Farsi) RTL news bot on Cloudflare Workers. Every two hours it collects news from public
 Telegram channels and configured RSS feeds, filters advertisements, summarizes and ranks
-stories with **free OpenRouter models only**, renders the run as a Vazirmatn Liquid Glass
-**album** (one high-resolution card per top story, delivered as a Telegram `sendMediaGroup`
-slideshow) with Cloudflare Browser Run, and publishes the album plus Telegram Rich Messages
+stories with **free OpenRouter models only**, renders the run as a white-template
+**slideshow** (a Telegram `sendMediaGroup` album in which every slide covers four news
+items — their AI headline and introductory text in a fixed 2×2 layout) with Cloudflare
+Browser Run, and publishes the album plus Telegram Rich Messages
 text digests to Telegram and, when configured, mirrors the same output to Bale. Digest
 headlines use the AI topic category for a related emoji, and every story includes its title,
 summary details, and available key points.
@@ -21,7 +22,7 @@ Cron (every two hours, at even Tehran hours)
   └─ filter    → local advertisement filter      → filter_status    (no AI, no network)
   └─ summarize → POST https://openrouter.ai/api/v1/chat/completions → summary_text + title
   └─ rank      → one global AI comparison        → importance (1–5)
-  └─ publish   → Browser Run card screenshots + Telegram sendMediaGroup album (top news)
+  └─ publish   → Browser Run slide screenshots (4 news each) + Telegram sendMediaGroup album
              └─ text digest → Telegram sendRichMessage / Bale sendMessage
 ```
 
@@ -155,7 +156,7 @@ seconds. Both accept milliseconds; `0` disables the spacing.
 ## Bale delivery
 
 Bale delivery mirrors the Telegram output through the official Bale Business Bot API at
-`https://tapi.bale.ai/business/bot`: every album card (`sendPhoto`, PNG multipart, with
+`https://tapi.bale.ai/business/bot`: every album slide (`sendPhoto`, PNG multipart, with
 its caption) and every **delivered** text digest part (`sendMessage`). Add the Bale bot
 to the destination channel with permission to post, then configure `BALE_BOT_TOKEN` and
 `BALE_DESTINATION_CHANNEL` (both are required; without them publishing stays
@@ -207,8 +208,9 @@ long to fit alone is trimmed deterministically so the footer always survives.
 Per-run safety bound: publishing spends whatever is left of the Workers **Free** limit of
 50 subrequests per invocation, after reserving room for what earlier stages need — one
 fetch per enabled source channel for collection, up to 20 for summarization, one for the
-model list, and five for the run album (four Browser Run renders plus one
-`sendMediaGroup`). `publishMessageBudget(enabledChannels)` in `src/publisher.ts` computes
+model list, and the run album's real cost — one Browser Run render per slide plus one
+`sendMediaGroup` (nothing at all when no `BROWSER` binding is configured).
+`publishMessageBudget(enabledChannels, imageReserve)` in `src/publisher.ts` computes
 it and caps it at `MAX_MESSAGES_PER_RUN = 40`. There is **no**
 per-channel or global row cap, so current-window news is never silently postponed. When the
 bound is reached the remaining rows are recorded with the explicit `run_limit` category and
@@ -220,7 +222,7 @@ Items are marked `published_at` (with `telegram_destination_message_id`) only af
 confirms each delivered message, so a failed or rate-limited part is retried next run
 without duplicating what already went out.
 
-## AI importance and the news album (slideshow)
+## AI importance and the news slideshow (four items per slide)
 
 After summaries are created, one global OpenRouter ranking request compares eligible news
 across all enabled source channels and stores an `importance` score from 1 to 5. Score 1
@@ -228,25 +230,35 @@ means the item is not important enough for the visual; scores 2–5 are eligible
 ranking is persisted in D1, so image selection is deterministic and independent of
 channel order. Legacy rows with a null score remain eligible as a migration fallback.
 
-When `BROWSER` is configured, publishing renders the run as a real Telegram **album**:
-the Worker builds one Persian RTL Liquid Glass HTML card per top news item (at most
-four, chosen by importance), Browser Run rasterizes each at 2560×1440, and all cards are
-delivered together through Telegram `sendMediaGroup` — a swipeable slideshow in the
-channel. A single card is sent as an ordinary `sendPhoto`, because a media group needs
-at least two items. Captions are plain text (no parse mode, so nothing can be rejected):
-the first card carries the run header («اخبار لحظه‌ای» + Tehran date/time), every card
-names its source channel, and the last card lists the remaining headlines
-(«سایر عناوین» + «و n خبر دیگر» when more than eight remain) — the same information
-the old ticker strip carried.
+When `BROWSER` is configured, publishing renders the run as a real Telegram **slideshow**:
+the run's eligible news (every item with an AI headline and introductory text, importance
+≠ 1, most important first) is split into slides of **four items**, each slide is laid out
+by ONE fixed white-template HTML frame with clearly defined sections — header (run title,
+«گزارش خبری خودکار» kicker with the slide number «اسلاید ۲ از ۵», Tehran date/time stamp),
+news board (the constant 2×2 grid: topic emoji, headline, introductory text, source label
+per item), optional overflow ticker, and footer (source credits + signature). Browser Run
+rasterizes each slide at 2560×1440 and Telegram delivers them together through
+`sendMediaGroup` — a swipeable album in the channel. A single slide is sent as an ordinary
+`sendPhoto`, because a media group needs at least two items; the trailing partial slide
+(fewer than four items left) keeps the same template and simply fills the board.
+
+Because every slide covers four news items, the whole run's news rides in the slideshow —
+nothing is demoted to a one-line ticker while slide capacity remains. The album holds at
+most ten slides (Telegram's media-group limit = 40 news items); only beyond that does the
+last slide grow the «سایر عناوین» ticker strip and caption overflow line again. Captions
+are plain text (no parse mode, so nothing can be rejected): the first slide carries the
+run header («اخبار لحظه‌ای» + Tehran date/time), every slide lists its items' headlines
+with their source channels, and the last slide appends the overflow headlines if any.
 
 Browser Run limits are respected explicitly: renders are spaced by
 `IMAGE_RENDER_SPACING_MS` (default 10.5s, matching the Workers Free plan's ~1 Quick
 Action per 10 seconds), a single HTTP 429 is retried once, and after a second 429 the
-remaining cards are skipped instead of hammering — the album degrades to fewer cards
+remaining slides are skipped instead of hammering — the album degrades to fewer slides
 rather than failing the run. PNGs are never stored in D1 or R2; they exist only for the
 duration of the send. Album failure is isolated, so the ordinary per-channel text
-digests still publish. When configured, every album card is mirrored to Bale
-(`sendPhoto`) as well.
+digests still publish. When configured, every album slide is mirrored to Bale
+(`sendPhoto`) as well. The `/testimage` admin command exercises this exact path — it
+renders the real pending slides with the same spacing setting.
 
 
 ### Rich text transport

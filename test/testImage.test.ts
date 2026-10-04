@@ -29,6 +29,8 @@ const baseEnv = (over: Partial<Env> = {}): Env =>
     TELEGRAM_ADMIN_USER_ID: String(ADMIN_ID),
     TELEGRAM_WEBHOOK_SECRET: SECRET,
     TELEGRAM_DESTINATION_CHANNEL: DESTINATION,
+    // The test album renders its slides back to back, like the pipeline in CI.
+    IMAGE_RENDER_SPACING_MS: '0',
     ...over,
   }) as Env;
 
@@ -177,17 +179,17 @@ afterEach(() => {
 
 describe('sendTestImage', () => {
   it('renders the REAL pending news and sends only the album', async () => {
-    await seedNews(6); // 4 card images + 2 ticker lines in the last caption
+    await seedNews(6); // 2 slides of four news (4 + 2), no overflow
     const h = harness();
 
     const result = await sendTestImage(baseEnv({ BROWSER: h.browser }), {
       fetchImpl: h.fetchImpl,
     });
 
-    expect(result).toMatchObject({ ok: true, messageId: 707, cards: 4, ticker: 2 });
+    expect(result).toMatchObject({ ok: true, messageId: 707, slides: 2, items: 6, ticker: 0 });
 
-    // One Browser Run request per card, and exactly one Telegram album send.
-    expect(h.browser.quickAction).toHaveBeenCalledTimes(4);
+    // One Browser Run request per slide, and exactly one Telegram album send.
+    expect(h.browser.quickAction).toHaveBeenCalledTimes(2);
     expect(h.calls).toHaveLength(1);
     expect(h.calls[0].url).toBe(`https://api.telegram.org/bot${BOT_TOKEN}/sendMediaGroup`);
 
@@ -207,9 +209,10 @@ describe('sendTestImage', () => {
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.bale).toEqual({ sent: true });
     const urls = h.calls.map((c) => c.url);
-    // One Telegram album plus one Bale photo per card.
-    expect(urls.filter((u) => u.includes('sendMediaGroup'))).toHaveLength(1);
-    expect(urls.filter((u) => u === 'https://tapi.bale.ai/botbale-token/sendPhoto')).toHaveLength(2);
+    // Two news share one slide: a Telegram sendPhoto plus one Bale photo.
+    expect(urls.filter((u) => u.includes('sendMediaGroup'))).toHaveLength(0);
+    expect(urls.filter((u) => u.includes('sendPhoto'))).toHaveLength(2);
+    expect(urls.filter((u) => u === 'https://tapi.bale.ai/botbale-token/sendPhoto')).toHaveLength(1);
     // Standard bot base — never the restricted /business/ endpoint.
     expect(urls.some((u) => u.includes('/business/'))).toBe(false);
   });
@@ -321,11 +324,12 @@ describe('sendTestImage', () => {
 /* ---------------------------------------------------------- admin rendering */
 
 describe('renderTestImageResult', () => {
-  it('reports success with cards, ticker and size', () => {
+  it('reports success with slides, news items and size', () => {
     const text = renderTestImageResult({
       ok: true,
       messageId: 707,
-      cards: 4,
+      slides: 4,
+      items: 15,
       ticker: 3,
       bytes: 250_000,
       browserRunMs: 1200,
@@ -380,8 +384,8 @@ describe('/testimage command and img:test button', () => {
       r
     );
 
-    // One Browser Run request per card + one sendMediaGroup, and no sendMessage anywhere.
-    expect(h.browser.quickAction).toHaveBeenCalledTimes(4);
+    // One Browser Run request per slide + one sendMediaGroup, and no sendMessage anywhere.
+    expect(h.browser.quickAction).toHaveBeenCalledTimes(2);
     expect(h.calls).toHaveLength(1);
     expect(h.calls[0].url).toContain('/sendMediaGroup');
 
@@ -423,7 +427,7 @@ describe('/testimage command and img:test button', () => {
 
     await handleTelegramUpdate(cb('img:test') as TelegramUpdate, baseEnv({ BROWSER: h.browser }), undefined, r);
 
-    expect(h.browser.quickAction).toHaveBeenCalledTimes(3);
+    expect(h.browser.quickAction).toHaveBeenCalledTimes(1);
     expect(r.edited).toHaveLength(1);
     expect(r.edited[0].text).toContain('✅');
   });
@@ -453,8 +457,9 @@ describe('POST /api/telegram/test-image', () => {
 
     expect(res.status).toBe(200);
     expect(body).toContain('"messageId":707');
-    expect(body).toContain('"cards":4');
-    expect(body).toContain('"ticker":2');
+    expect(body).toContain('"slides":2');
+    expect(body).toContain('"items":6');
+    expect(body).toContain('"ticker":0');
     expect(body).not.toContain(BOT_TOKEN);
     expect(body).not.toContain(DESTINATION);
   });

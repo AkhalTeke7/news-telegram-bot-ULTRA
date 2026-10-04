@@ -512,7 +512,7 @@ async function runPipeline(mode, btn) {
         if (r.publishing.image) {
           const img = r.publishing.image;
           lines.push('تصویر خبری: ' + (img.sent
-            ? 'ارسال شد (' + img.cards + ' تصویر' + (img.ticker > 0 ? '، ' + img.ticker + ' عنوان دیگر' : '') + ')'
+            ? 'ارسال شد (' + img.slides + ' اسلاید، ' + img.items + ' خبر' + (img.ticker > 0 ? '، ' + img.ticker + ' عنوان دیگر' : '') + ')'
             : 'ارسال نشد — ' + imageReasonLabel(img.reason) + (img.detail ? ' (' + img.detail + ')' : '')));
         }
       }

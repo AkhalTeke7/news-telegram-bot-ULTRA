@@ -3,9 +3,9 @@
  * destination.
  *
  * Purpose: let the admin exercise the FULL image path (real pending news from
- * D1 → one card per top story → Browser Run screenshots → sendMediaGroup
- * slideshow) without waiting for the cron run and without touching any
- * publish state:
+ * D1 → fixed-template slides, four news items each → Browser Run screenshots →
+ * sendMediaGroup slideshow) without waiting for the cron run and without
+ * touching any publish state:
  *
  *  - the news is REAL: exactly the rows the next run would publish
  *    (summarized, unfiltered, not yet published);
@@ -19,7 +19,13 @@
  */
 
 import { baleSendPhoto } from './bale';
-import { buildAlbumCaptions, renderRunAlbum, type BrowserBinding } from './newsImage';
+import { readMsEnv } from './pipeline';
+import {
+  DEFAULT_IMAGE_RENDER_SPACING_MS,
+  buildAlbumCaptions,
+  renderRunAlbum,
+  type BrowserBinding,
+} from './newsImage';
 import { resolveBaleDelivery, resolveDestination, selectPublishableMessages } from './publisher';
 import { sendMediaGroup, sendPhoto, TelegramError } from './telegram';
 import { describeTelegramError, type BaleTestOutcome, type TestMessageErrorCategory } from './testMessage';
@@ -41,9 +47,11 @@ export interface TestImageSuccess {
   ok: true;
   /** Message id Telegram assigned to the delivered test photo. */
   messageId: number;
-  /** News shown as cards (at most four). */
-  cards: number;
-  /** Headlines shown in the ticker strip below the cards. */
+  /** Slides sent in the test album (each covers four news items). */
+  slides: number;
+  /** News items carried across the slides. */
+  items: number;
+  /** Overflow headlines shown in the last slide's ticker. */
   ticker: number;
   /** PNG size in bytes. */
   bytes: number;
@@ -123,9 +131,20 @@ export async function sendTestImage(
 
   let album;
   try {
-    // No spacing: a diagnostic button must stay fast; the real run paces its
-    // Browser Run calls through the pipeline's render spacing setting.
-    album = await renderRunAlbum({ browser, items: rows, now: opts.now });
+    // The test renders the REAL album, so it paces its Browser Run calls with
+    // the very same IMAGE_RENDER_SPACING_MS setting the pipeline uses — a
+    // diagnostic that tripped the free-tier Quick Action limit would not
+    // diagnose anything. (Tests set the binding to 0 and stay fast.)
+    album = await renderRunAlbum({
+      browser,
+      items: rows,
+      now: opts.now,
+      spacingMs: readMsEnv(
+        env.IMAGE_RENDER_SPACING_MS,
+        DEFAULT_IMAGE_RENDER_SPACING_MS,
+        120_000
+      ),
+    });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     logTestImage('error', { category: 'render_failed' });
@@ -145,9 +164,9 @@ export async function sendTestImage(
     };
   }
 
-  // Cards were selected but none could be rendered (Browser Run down or rate
+  // Slides were selected but none could be rendered (Browser Run down or rate
   // limited) — the same outcome the pipeline would report as render_failed.
-  if (album.cards.length === 0) {
+  if (album.slides.length === 0) {
     logTestImage('error', { category: 'render_failed', reason: album.error });
     return {
       ok: false,
@@ -157,19 +176,19 @@ export async function sendTestImage(
   }
 
   const captions = buildAlbumCaptions(
-    album.cards.map((card) => card.item),
+    album.slides.map((slide) => slide.items),
     album.ticker,
     album.hidden,
     opts.now ?? new Date()
   );
-  const bytes = album.cards.reduce((sum, card) => sum + card.bytes, 0);
+  const bytes = album.slides.reduce((sum, slide) => sum + slide.bytes, 0);
 
   try {
-    const media = album.cards.map((card, index) => ({
-      photo: card.png,
+    const media = album.slides.map((slide, index) => ({
+      photo: slide.png,
       caption: captions[index],
     }));
-    // A media group needs at least two photos; one card goes as sendPhoto.
+    // A media group needs at least two photos; one slide goes as sendPhoto.
     const sent =
       media.length >= 2
         ? (await sendMediaGroup({
@@ -184,7 +203,7 @@ export async function sendTestImage(
         : await sendPhoto({
             token,
             chatId: destination,
-            photo: album.cards[0].png,
+            photo: album.slides[0].png,
             caption: captions[0],
             disableNotification: true,
             fetchImpl: opts.fetchImpl,
@@ -192,17 +211,19 @@ export async function sendTestImage(
           });
     logTestImage('ok', {
       messageId: sent.message_id,
-      cards: album.cards.length,
+      slides: album.slides.length,
+      items: album.selected,
       ticker: album.ticker.filter((t) => !t.more).length,
       bytes,
     });
     // Best-effort Bale mirror of the very same PNGs, so this button also
     // verifies the Bale token + destination. Never affects the Telegram result.
-    const bale = await mirrorTestImageToBale(env, album.cards, captions, opts.fetchImpl);
+    const bale = await mirrorTestImageToBale(env, album.slides, captions, opts.fetchImpl);
     return {
       ok: true,
       messageId: sent.message_id,
-      cards: album.cards.length,
+      slides: album.slides.length,
+      items: album.selected,
       ticker: album.ticker.filter((t) => !t.more).length,
       bytes,
       browserRunMs: album.browserRunMs,
@@ -222,7 +243,7 @@ export async function sendTestImage(
   }
 }
 
-/** Mirrors every test card to Bale; undefined when Bale is not configured. */
+/** Mirrors every test slide to Bale; undefined when Bale is not configured. */
 async function mirrorTestImageToBale(
   env: Env,
   cards: { png: ArrayBuffer }[],

@@ -605,7 +605,7 @@ describe('per-run limits', () => {
     const t = telegramRecorder();
     const first = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
 
-    expect(t.sent).toHaveLength(publishMessageBudget(18));
+    expect(t.sent).toHaveLength(publishMessageBudget(18, 0));
     expect(t.sent[0].text).toContain('@many_chan_1');
     expect(first.failures.some((f) => f.category === 'run_limit')).toBe(true);
 
@@ -635,7 +635,7 @@ describe('per-run limits', () => {
     const t = telegramRecorder();
     const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
 
-    const budget = publishMessageBudget(1);
+    const budget = publishMessageBudget(1, 0);
     expect(t.sent.length).toBe(budget);
     expect(t.sent.length).toBeLessThanOrEqual(MAX_MESSAGES_PER_RUN);
     // The rest is recorded, not silently dropped.
@@ -670,12 +670,19 @@ describe('per-run limits', () => {
 describe('subrequest budget', () => {
   beforeEach(reset);
 
-  it('derives the budget from the Free subrequest limit and the enabled channels', () => {
+  it('derives the budget from the Free subrequest limit and the album size', () => {
     // 50 total - summarize(20) - model list(1) - collection(1 per channel)
-    // - album reserve(5: four Browser Run renders + one media group send)
-    expect(publishMessageBudget(0)).toBe(24);
-    expect(publishMessageBudget(5)).toBe(19);
-    expect(publishMessageBudget(10)).toBe(14);
+    // - album reserve (one Browser Run render per slide + one media group send).
+    // Default reserve (a single slide + send = 2):
+    expect(publishMessageBudget(0)).toBe(27);
+    expect(publishMessageBudget(5)).toBe(22);
+    expect(publishMessageBudget(10)).toBe(17);
+    // No Browser Run binding => no album at all => nothing reserved:
+    expect(publishMessageBudget(0, 0)).toBe(29);
+    expect(publishMessageBudget(1, 0)).toBe(28);
+    expect(publishMessageBudget(18, 0)).toBe(11);
+    // A five-slide album reserves six (five renders + one send):
+    expect(publishMessageBudget(0, 6)).toBe(23);
     // Always at least one message, so publishing never stalls completely.
     expect(publishMessageBudget(1000)).toBe(1);
     // Never above the hard ceiling.
@@ -694,8 +701,9 @@ describe('subrequest budget', () => {
     const t = telegramRecorder();
     const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
 
-    // Budget for 5 enabled channels is 19; the run must not exceed it.
-    expect(t.sent.length).toBeLessThanOrEqual(publishMessageBudget(5));
+    // No Browser Run binding: the budget for 5 enabled channels is 24; the
+    // run must not exceed it.
+    expect(t.sent.length).toBeLessThanOrEqual(publishMessageBudget(5, 0));
     expect(report.failures.some((f) => f.category === 'run_limit')).toBe(true);
 
     // Collection + summarization + publishing now fit the 50-subrequest budget.
@@ -926,13 +934,15 @@ describe('Bale mirror', () => {
       bale: BALE,
     });
 
-    // Two items => one two-card album on Telegram, one Bale photo per card.
-    expect(h.telegramGroups).toHaveLength(1);
-    expect(h.telegramPhotos).toHaveLength(0);
-    expect(h.balePhotos).toHaveLength(2);
+    // Two items share one slide: a sendPhoto album on Telegram, mirrored to
+    // Bale as one photo carrying both headlines in its caption.
+    expect(h.telegramGroups).toHaveLength(0);
+    expect(h.telegramPhotos).toHaveLength(1);
+    expect(h.balePhotos).toHaveLength(1);
     expect(h.baleTexts).toHaveLength(2);
-    expect(report.bale).toEqual({ sent: 4, failed: 0 });
+    expect(report.bale).toEqual({ sent: 3, failed: 0 });
     expect(report.image?.sent).toBe(true);
+    expect(report.image?.slides).toBe(1);
     expect(report.image?.selected).toBe(2);
   });
 

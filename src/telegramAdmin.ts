@@ -403,9 +403,9 @@ async function renderChannelList(env: Env): Promise<string> {
 }
 
 /**
- * Admin-facing report for the image-only test. Success lists what the image
- * contains (cards, ticker lines, size, render time); failure repeats the safe
- * Persian reason from sendTestImage.
+ * Admin-facing report for the image-only test. Success lists what the album
+ * contains (slides, news items, overflow lines, size, render time); failure
+ * repeats the safe Persian reason from sendTestImage.
  */
 export function renderTestImageResult(result: TestImageResult): string {
   if (result.ok) {
@@ -413,8 +413,9 @@ export function renderTestImageResult(result: TestImageResult): string {
       '✅ تصویر آزمایشی به کانال مقصد ارسال شد.',
       '',
       `شناسه پیام: ${result.messageId}`,
-      `تصاویر آلبوم: ${result.cards}`,
-      `سایر عناوین (کپشن): ${result.ticker}`,
+      `اسلایدهای آلبوم: ${result.slides} (هر اسلاید ۴ خبر)`,
+      `اخبار داخل اسلایدها: ${result.items}`,
+      `سایر عناوین (سرریز): ${result.ticker}`,
       `حجم تصاویر: ${Math.max(1, Math.round(result.bytes / 1024))} کیلوبایت`,
       `زمان رندر: ${result.browserRunMs} میلی‌ثانیه`,
       ...(result.bale ? [result.bale.sent ? 'بیل: ارسال شد ✅' : 'بیل: ناموفق ❌'] : []),
@@ -494,7 +495,14 @@ export function renderPipelineResult(outcome: {
     rateLimited?: boolean;
     failureCategories?: Record<string, number>;
     bale?: { sent: number; failed: number };
-    image?: { sent: boolean; cards: number; ticker?: number; reason?: string; detail?: string };
+    image?: {
+      sent: boolean;
+      slides: number;
+      items?: number;
+      ticker?: number;
+      reason?: string;
+      detail?: string;
+    };
   } | null;
   itemFailures: number;
   durationMs: number;
@@ -571,12 +579,20 @@ function describePublishFailures(categories: Record<string, number> | undefined)
 
 /** One line telling the admin whether the run album reached the channel. */
 function describeImageOutcome(
-  image: { sent: boolean; cards: number; ticker?: number; reason?: string; detail?: string } | undefined
+  image: {
+    sent: boolean;
+    slides: number;
+    items?: number;
+    ticker?: number;
+    reason?: string;
+    detail?: string;
+  } | undefined
 ): string[] {
   if (!image) return [];
   if (image.sent) {
+    const itemsNote = image.items !== undefined ? `، ${image.items} خبر` : '';
     const tickerNote = image.ticker && image.ticker > 0 ? `، ${image.ticker} عنوان دیگر` : '';
-    return [`تصویر خبری: ارسال شد (${image.cards} تصویر${tickerNote})`];
+    return [`تصویر خبری (اسلایدشو): ارسال شد (${image.slides} اسلاید${itemsNote}${tickerNote})`];
   }
   return [
     `تصویر خبری: ارسال نشد — ${

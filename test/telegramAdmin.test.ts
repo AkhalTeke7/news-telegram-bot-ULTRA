@@ -653,7 +653,7 @@ it('registers the manual pipeline with the execution context instead of firing a
         rateLimited: false,
         failureCategories: { invalid_source_url: 4, telegram_error: 2 },
         bale: { sent: 0, failed: 0 },
-        image: { sent: false, cards: 0, ticker: 0, reason: 'render_failed', detail: 'browser_run: HTTP 429' },
+        image: { sent: false, slides: 0, ticker: 0, reason: 'render_failed', detail: 'browser_run: HTTP 429' },
       },
       itemFailures: 24,
       durationMs: 38_000,

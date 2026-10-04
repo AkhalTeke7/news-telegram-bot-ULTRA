@@ -75,7 +75,10 @@ export interface PipelineOutcome {
      */
     image?: {
       sent: boolean;
-      cards: number;
+      /** Slide images in the album (each covers four news items). */
+      slides: number;
+      /** News items carried across the slides. */
+      items: number;
       ticker: number;
       reason?: string;
       detail?: string;
@@ -85,7 +88,7 @@ export interface PipelineOutcome {
 }
 
 /** Reads a non-negative millisecond tuning value from the environment. */
-function readMsEnv(raw: string | undefined, fallback: number, max: number): number {
+export function readMsEnv(raw: string | undefined, fallback: number, max: number): number {
   const parsed = Number.parseInt((raw ?? '').trim(), 10);
   if (!Number.isFinite(parsed) || parsed < 0) return fallback;
   return Math.min(parsed, max);
@@ -290,6 +293,7 @@ function describeImage(
     eligible: number;
     image?: {
       sent: boolean;
+      slides: number;
       selected: number;
       ticker: number;
       error?: string;
@@ -297,12 +301,20 @@ function describeImage(
     };
   },
   env: Env
-): { sent: boolean; cards: number; ticker: number; reason?: string; detail?: string } | undefined {
+): {
+  sent: boolean;
+  slides: number;
+  items: number;
+  ticker: number;
+  reason?: string;
+  detail?: string;
+} | undefined {
   if (publishing.image) {
-    const { sent, selected, ticker, error, detail } = publishing.image;
+    const { sent, slides, selected, ticker, error, detail } = publishing.image;
     return {
       sent,
-      cards: selected,
+      slides,
+      items: selected,
       ticker,
       ...(error ? { reason: error, ...(detail ? { detail } : {}) } : {}),
     };
@@ -310,7 +322,8 @@ function describeImage(
   if (publishing.eligible > 0) {
     return {
       sent: false,
-      cards: 0,
+      slides: 0,
+      items: 0,
       ticker: 0,
       reason: env.BROWSER ? 'no_suitable_items' : 'browser_binding_missing',
     };

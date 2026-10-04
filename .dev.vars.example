@@ -28,6 +28,6 @@ TELEGRAM_WEBHOOK_SECRET=""
 # Minimum spacing between two OpenRouter chat requests, keeping one run under
 # the free tier's account-wide ~20 requests/minute cap. Default 3200.
 AI_REQUEST_PACE_MS=""
-# Wait between two album card renders, honoring the Browser Run free-tier
+# Wait between two album slide renders, honoring the Browser Run free-tier
 # limit of ~1 Quick Action per 10 seconds. Default 10500.
 IMAGE_RENDER_SPACING_MS=""

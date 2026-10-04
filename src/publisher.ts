@@ -17,9 +17,11 @@ import { listChannels } from './channels';
 import { baleSendMessage, baleSendPhoto } from './bale';
 import {
   buildAlbumCaptions,
+  MAX_ALBUM_SLIDES,
+  MAX_IMAGE_ITEMS,
   renderRunAlbum,
   type BrowserBinding,
-  type RenderedCardImage,
+  type RenderedSlideImage,
 } from './newsImage';
 import {
   isValidDestinationChat,
@@ -50,30 +52,36 @@ export const SUBREQUEST_LIMIT_FREE = 50;
 export const SUMMARIZE_RESERVE = 20;
 export const MODEL_LIST_RESERVE = 1;
 /**
- * The run ALBUM costs up to five subrequests: four Browser Run renders (one
- * per card) plus one `sendMediaGroup` (or `sendPhoto` for a single card).
- * Reserving them here keeps the whole invocation inside the platform limit
- * instead of overrunning it at the end of the run. The best-effort Bale
- * mirror is additional but deliberately not counted, exactly as before.
+ * The run album's subrequest cost: one Browser Run render per slide plus one
+ * `sendMediaGroup` (or `sendPhoto` for a single slide). This constant is the
+ * DEFAULT (one slide + send) used when no better estimate exists; the pipeline
+ * computes the real slide count from the pending news and passes
+ * `slides + 1` explicitly. Reserving them keeps the whole invocation inside
+ * the platform limit instead of overrunning it at the end of the run. The
+ * best-effort Bale mirror is additional but deliberately not counted.
  */
-export const IMAGE_RESERVE = 5;
+export const IMAGE_RESERVE = 2;
 /** Absolute ceiling, never exceeded regardless of the budget. */
 export const MAX_MESSAGES_PER_RUN = 40;
 
 /**
  * Messages this run may send: the platform budget minus what the earlier stages
- * and the run image need, clamped to [1, MAX_MESSAGES_PER_RUN]. Deterministic
- * for a given enabled-channel count. Anything left over is recorded with the
- * explicit `run_limit` category and stays unpublished, so the next run continues
- * with it in the same configured order — nothing is silently dropped.
+ * and the run album need, clamped to [1, MAX_MESSAGES_PER_RUN]. Deterministic
+ * for a given enabled-channel count and album size. Anything left over is
+ * recorded with the explicit `run_limit` category and stays unpublished, so the
+ * next run continues with it in the same configured order — nothing is silently
+ * dropped.
  */
-export function publishMessageBudget(enabledChannelCount: number): number {
+export function publishMessageBudget(
+  enabledChannelCount: number,
+  imageReserve: number = IMAGE_RESERVE
+): number {
   const available =
     SUBREQUEST_LIMIT_FREE -
     enabledChannelCount -
     SUMMARIZE_RESERVE -
     MODEL_LIST_RESERVE -
-    IMAGE_RESERVE;
+    Math.max(0, imageReserve);
   return Math.min(MAX_MESSAGES_PER_RUN, Math.max(1, available));
 }
 
@@ -237,7 +245,7 @@ export interface PublishOptions {
   browser?: BrowserBinding;
   now?: Date;
   /**
-   * Wait between two album card renders, honoring the free-plan Quick Action
+   * Wait between two album slide renders, honoring the free-plan Quick Action
    * rate limit (≈1 request/10s). The pipeline passes the production value;
    * 0 (default) renders back to back.
    */
@@ -255,7 +263,9 @@ export interface PublishOptions {
 
 /** Outcome of the optional run album (the multi-image slideshow). */
 export interface ImagePublishOutcome {
-  /** Card images actually sent in the album (at most four). */
+  /** Slide images actually sent in the album (at most MAX_ALBUM_SLIDES). */
+  slides: number;
+  /** News items carried across the sent slides (up to four per slide). */
   selected: number;
   /** Distinct source channels represented in the album. */
   channels: number;
@@ -264,9 +274,9 @@ export interface ImagePublishOutcome {
   width: number;
   height: number;
   browserRunMs: number;
-  /** Remaining headlines carried by the last card's caption. */
+  /** Overflow headlines carried by the last slide's ticker and caption. */
   ticker: number;
-  /** Selected cards that failed to render and were skipped. */
+  /** Selected slides that failed to render and were skipped. */
   skipped: number;
   /** Set when rendering or sending failed; text publishing is unaffected. */
   error?: string;
@@ -680,15 +690,31 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
   // No channel is dropped: every enabled channel is represented.
   const groups = groupByChannel(usable);
   const enabledChannels = (await listChannels(db)).filter((c) => c.enabled).length;
-  const messageBudget = publishMessageBudget(enabledChannels);
+
+  // The album's real subrequest cost, computed BEFORE anything is sent: one
+  // Browser Run render per expected slide plus one sendMediaGroup. Slides are
+  // chunked from the same eligibility filter renderRunAlbum uses (AI headline
+  // + intro present, importance ≠ 1), so the reserve matches what will really
+  // be spent. Without a Browser Run binding or eligible news it is zero.
+  const albumEligible = usable.filter(
+    (i) => i.summaryText.trim().length > 0 && i.importance !== 1
+  );
+  const expectedSlides =
+    opts.browser && albumEligible.length > 0
+      ? Math.min(MAX_ALBUM_SLIDES, Math.ceil(albumEligible.length / MAX_IMAGE_ITEMS))
+      : 0;
+  const messageBudget = publishMessageBudget(
+    enabledChannels,
+    expectedSlides > 0 ? expectedSlides + 1 : 0
+  );
   let messagesSent = 0;
 
   // The run album (slideshow). Generated once from the flat publishable list
   // and sent BEFORE any text digest. Deliberately outside the per-channel loop
-  // below, so Browser Run is called at most once per card across the run.
+  // below, so Browser Run is called at most once per slide across the run.
   const image = await publishRunAlbum({
     // RSS rows swap the synthetic `rss_N` username for the feed's display
-    // title, so the album cards and captions show «بی‌بی‌سی فارسی», not @rss_3.
+    // title, so the album slides and captions show «بی‌بی‌سی فارسی», not @rss_3.
     items: usable.map((i) =>
       i.sourceType === 'rss' ? { ...i, channelUsername: channelDisplayName(i) } : i
     ),
@@ -810,12 +836,13 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
 }
 
 /**
- * Generates and sends THE run album: one card image per top news item,
- * delivered by Telegram as a single slideshow (sendMediaGroup).
+ * Generates and sends THE run album: a slideshow of fixed-template slides,
+ * every slide covering four news items (headline + introductory text),
+ * delivered by Telegram as a single `sendMediaGroup`.
  *
  * Invariants:
  *  - called exactly once from `runPublishing`, outside the channel loop, so
- *    Browser Run is spent only on the album (≤ MAX_IMAGE_ITEMS cards);
+ *    Browser Run is spent only on the album (≤ MAX_ALBUM_SLIDES renders);
  *  - never touches publish state: a failure here leaves every text digest and
  *    every `published_at` exactly as the existing logic would have left them;
  *  - every PNG is a local buffer released as soon as the send resolves.
@@ -849,11 +876,12 @@ async function publishRunAlbum(input: {
       sleepImpl: input.sleepImpl,
     });
   } catch (error) {
-    // Rendering failed before any card existed (binding unusable). Text
+    // Rendering failed before any slide existed (binding unusable). Text
     // publishing continues untouched and nothing is marked published.
     const detail = error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 120) : 'unknown';
     logImage('error', { newsCount: items.length, reason: detail });
     return {
+      slides: 0,
       selected: 0,
       channels: 0,
       sent: false,
@@ -872,10 +900,11 @@ async function publishRunAlbum(input: {
   // no Browser Run request at all.
   if (!album) return null;
 
-  // Every selected card failed to render (Browser Run down or rate limited).
-  if (album.cards.length === 0) {
+  // Every selected slide failed to render (Browser Run down or rate limited).
+  if (album.slides.length === 0) {
     logImage('error', { newsCount: items.length, reason: album.error, skipped: album.skipped });
     return {
+      slides: 0,
       selected: 0,
       channels: 0,
       sent: false,
@@ -891,21 +920,21 @@ async function publishRunAlbum(input: {
   }
 
   const captions = buildAlbumCaptions(
-    album.cards.map((card) => card.item),
+    album.slides.map((slide) => slide.items),
     album.ticker,
     album.hidden,
     input.now ?? new Date()
   );
 
-  // Mirror every card to Bale before the Telegram send. Independent and
+  // Mirror every slide to Bale before the Telegram send. Independent and
   // isolated: a Bale failure never changes the Telegram outcome below.
   if (input.bale) {
-    for (const [index, card] of album.cards.entries()) {
+    for (const [index, slide] of album.slides.entries()) {
       try {
         await baleSendPhoto({
           token: input.bale.token,
           chatId: input.bale.destination,
-          photo: card.png,
+          photo: slide.png,
           caption: captions[index],
           fetchImpl: input.fetchImpl,
         });
@@ -920,12 +949,14 @@ async function publishRunAlbum(input: {
   }
 
   const base: ImagePublishOutcome = {
-    selected: album.cards.length,
-    channels: new Set(album.cards.map((card) => card.item.channelUsername)).size,
+    slides: album.slides.length,
+    selected: album.selected,
+    channels: new Set(album.slides.flatMap((slide) => slide.items.map((i) => i.channelUsername)))
+      .size,
     sent: false,
-    bytes: album.cards.reduce((sum, card) => sum + card.bytes, 0),
-    width: album.cards[0].width,
-    height: album.cards[0].height,
+    bytes: album.slides.reduce((sum, slide) => sum + slide.bytes, 0),
+    width: album.slides[0].width,
+    height: album.slides[0].height,
     browserRunMs: album.browserRunMs,
     ticker: album.ticker.filter((t) => !t.more).length,
     skipped: album.skipped,
@@ -935,7 +966,7 @@ async function publishRunAlbum(input: {
     await sendAlbum({
       token,
       destination,
-      cards: album.cards,
+      slides: album.slides,
       captions,
       fetchImpl: input.fetchImpl,
       baseUrl: input.baseUrl,
@@ -960,23 +991,23 @@ async function publishRunAlbum(input: {
 }
 
 /**
- * Sends the album: one `sendMediaGroup` for two or more cards — Telegram
+ * Sends the album: one `sendMediaGroup` for two or more slides — Telegram
  * shows them as a swipeable slideshow — and a plain `sendPhoto` for a single
- * card, because a media group requires at least two items.
+ * slide, because a media group requires at least two items.
  */
 async function sendAlbum(input: {
   token: string;
   destination: string;
-  cards: RenderedCardImage[];
+  slides: RenderedSlideImage[];
   captions: string[];
   fetchImpl?: typeof fetch;
   baseUrl?: string;
 }): Promise<void> {
-  if (input.cards.length === 1) {
+  if (input.slides.length === 1) {
     await sendPhoto({
       token: input.token,
       chatId: input.destination,
-      photo: input.cards[0].png,
+      photo: input.slides[0].png,
       caption: input.captions[0],
       fetchImpl: input.fetchImpl,
       baseUrl: input.baseUrl,
@@ -986,8 +1017,8 @@ async function sendAlbum(input: {
   await sendMediaGroup({
     token: input.token,
     chatId: input.destination,
-    media: input.cards.map((card, index) => ({
-      photo: card.png,
+    media: input.slides.map((slide, index) => ({
+      photo: slide.png,
       caption: input.captions[index],
     })),
     fetchImpl: input.fetchImpl,

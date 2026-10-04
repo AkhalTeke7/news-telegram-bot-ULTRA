@@ -358,7 +358,7 @@ describe('run report diagnostics', () => {
         model: 'apodex/apodex-1.1-mini:free',
         failureCategories: { invalid_response: 20 },
       },
-      publishing: { published: 0, image: { sent: false, cards: 0, reason: 'browser_binding_missing' } },
+      publishing: { published: 0, image: { sent: false, slides: 0, reason: 'browser_binding_missing' } },
       itemFailures: 20,
       durationMs: 50_000,
     });
