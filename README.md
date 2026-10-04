@@ -278,7 +278,7 @@ and read `message.from.id` from the update JSON. The value must be digits only.
 ### Bot commands and buttons
 
 `/start` shows the menu: add channel, list channels, system status, AI model status, last
-run, manual processing, test message, cancel. Channel deletion and manual processing both
+run, manual processing, test message, free-model picker (`🧠 انتخاب مدل رایگان`), cancel. Channel deletion and manual processing both
 require an explicit confirmation button, and a pending confirmation expires after 10
 minutes (`telegram_admin_state` in D1 — Workers are stateless, so pending actions live in
 the database and expire automatically).
@@ -482,9 +482,53 @@ Write endpoints require `content-type: application/json` and the session cookie
      `deepseek/deepseek-chat-v3-0324:free`) or the legacy `-free`; everything else is excluded.
    A model with unknown pricing is never selected.
 3. The free list is cached in `ai_settings` and refreshed at most once every 24 hours.
-4. On `rate_limited`/`provider_error` the failed model is excluded, the list is refreshed
-   immediately, and another free model is selected. If no free model is available the run
-   stops and the messages stay unsummarized — there is no paid fallback anywhere.
+4. Automatic selection is **preference-ordered**, not "first id in the list": `scoreModelId()`
+   in `src/modelManager.ts` ranks well-known instruction-following free families (DeepSeek,
+   Gemini Flash, Llama 3.3/4, Qwen, Mistral, GLM, Kimi …) above unknown or experimental free
+   endpoints, and penalises `:auto` routers plus vision/code/guard variants. This is why a run
+   no longer settles on something like `apodex/apodex-1.1-mini:free` and fails every item.
+5. Rotation on failure:
+   - `rate_limited` / `provider_error` → the model is abandoned **immediately** and the list is
+     refreshed;
+   - `invalid_response` / `timeout` / `network` → abandoned after `MAX_MODEL_FAILURES` (2)
+     consecutive failures. A free endpoint that answers HTTP 200 with prose instead of JSON used
+     to burn an entire run (20 identical `invalid_response` errors, zero rotation); it now costs
+     at most two items.
+   If no free model is available the run stops and the messages stay unsummarized — there is no
+   paid fallback anywhere.
+
+### Choosing the model by hand
+
+The free list is also selectable:
+
+- **Web panel** → section *«مدل هوش مصنوعی (رایگان)»*: a dropdown of every free model, plus
+  *«به‌روزرسانی فهرست مدل‌ها»* (one OpenRouter request) and *«خودکار»*.
+- **Telegram** → menu button *«🧠 انتخاب مدل رایگان»*: a paginated keyboard; tap a model to pin
+  it, *«♻️ خودکار»* to go back to automatic selection.
+- **API** → `GET /api/models` (add `?refresh=1` to re-query OpenRouter) and
+  `POST /api/models { "model": "<id>" | null }`.
+
+The pin is stored as `pinned_model` in `ai_settings`, wins over automatic selection, and
+survives the 24h refresh. Guarantees that still hold: only ids proven free by discovery can be
+pinned (`setPinnedModel()` refuses anything else), and if a pinned model fails inside a run the
+pipeline rotates away from it **for that run only** — the pin itself is never silently
+rewritten.
+
+### Why a run can report "0 summarized, N errors"
+
+Run reports (Telegram, web panel and `POST /api/pipeline/run`) now name the cause instead of a
+bare count:
+
+- `علت خطای خلاصه‌سازی: پاسخ نامعتبر مدل (20)` — the selected free model is not returning the
+  JSON contract; pin a different model.
+- `تصویر خبری: ارسال نشد — اتصال Browser Run تنظیم نشده است` — the `BROWSER` binding is missing,
+  so no picture can be rendered.
+- `تصویر خبری: ارسال نشد — خبر مناسبی برای تصویر نبود` — nothing publishable survived the
+  filters (the image needs at least one summarized, unpublished, non-`importance=1` row).
+
+Related fix: candidates the ranking model omits from its answer are now scored `2`, not `1`.
+Importance `1` means "do not publish" and removes a row from the run image, so a lazy/partial
+ranking answer used to silently produce an empty picture.
 
 ## Bi-hourly cron behaviour
 

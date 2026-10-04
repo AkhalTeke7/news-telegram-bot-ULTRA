@@ -30,6 +30,8 @@ export const APP_HTML = `<!DOCTYPE html>
   .clock b{display:block;color:var(--accent);font-weight:700;font-size:18px;letter-spacing:1px}
   h2{font-size:18px;font-weight:700;margin-bottom:14px}
   label{display:block;font-size:13px;color:var(--soft);margin-bottom:6px}
+  select{width:100%;padding:13px 16px;border-radius:16px;border:1px solid rgba(255,255,255,.9);background:rgba(255,255,255,.75);color:var(--ink);font:inherit;font-size:15px;direction:ltr;text-align:left;outline:none;box-shadow:inset 2px 2px 5px rgba(120,135,165,.14)}
+  select:focus{border-color:var(--accent);box-shadow:0 0 0 4px rgba(58,111,184,.15)}
   input[type=text],input[type=password]{width:100%;padding:13px 16px;border-radius:16px;border:1px solid rgba(255,255,255,.9);background:rgba(255,255,255,.65);color:var(--ink);font:inherit;font-size:15px;direction:ltr;text-align:left;outline:none;box-shadow:inset 2px 2px 5px rgba(120,135,165,.14)}
   input:focus{border-color:var(--accent);box-shadow:0 0 0 4px rgba(58,111,184,.15)}
   button{font:inherit;font-size:14px;font-weight:500;cursor:pointer;border-radius:14px;padding:9px 18px;color:var(--ink);background:linear-gradient(145deg,rgba(255,255,255,.9),rgba(255,255,255,.45));border:1px solid rgba(255,255,255,.9);box-shadow:3px 3px 8px rgba(100,110,125,.12),inset 1px 1px 2px #fff;transition:transform .12s}
@@ -122,6 +124,18 @@ export const APP_HTML = `<!DOCTYPE html>
       <div id="listMsg" class="msg"></div>
     </section>
 
+    <section class="glass" id="modelSection">
+      <h2>مدل هوش مصنوعی (رایگان)</h2>
+      <div class="sub" style="margin-bottom:10px">فقط مدل‌های رایگان OpenRouter فهرست می‌شوند. اگر مدلی را انتخاب کنید همان مدل برای خلاصه‌سازی و رتبه‌بندی استفاده می‌شود؛ با انتخاب «خودکار» سامانه بهترین مدل رایگان را خودش برمی‌گزیند.</div>
+      <label for="modelSelect">مدل مورد استفاده</label>
+      <select id="modelSelect"><option value="">در حال بارگذاری…</option></select>
+      <div class="row">
+        <button id="saveModelBtn" class="primary">ذخیره مدل</button>
+        <button id="refreshModelsBtn">🔄 به‌روزرسانی فهرست مدل‌ها</button>
+      </div>
+      <div id="modelMsg" class="msg"></div>
+    </section>
+
     <section class="glass" id="toolsSection">
       <h2>ابزارها و آزمون</h2>
       <div class="mode-row tile" id="modeRow">
@@ -200,6 +214,36 @@ async function loadSettings() {
   } catch {}
 }
 
+let modelCatalog = { models: [], selected: null, pinned: null };
+
+// Free-model catalog. A refresh re-queries OpenRouter (one subrequest); the
+// default read is cache-only, so opening the panel costs nothing.
+async function loadModels(refresh) {
+  const sel = $('modelSelect');
+  try {
+    const data = await api('/api/models' + (refresh ? '?refresh=1' : ''));
+    modelCatalog = data;
+    sel.textContent = '';
+    const auto = mk('option', '', 'خودکار (بهترین مدل رایگان)');
+    auto.value = '';
+    sel.appendChild(auto);
+    for (const id of data.models) {
+      const o = mk('option', '', id + (id === data.selected && !data.pinned ? '  ← در حال استفاده' : ''));
+      o.value = id;
+      sel.appendChild(o);
+    }
+    sel.value = data.pinned || '';
+    const parts = [];
+    parts.push(data.models.length + ' مدل رایگان');
+    if (data.selected) parts.push('مدل فعلی: ' + data.selected);
+    parts.push(data.pinned ? 'انتخاب دستی' : 'انتخاب خودکار');
+    if (data.refreshError) parts.push('⚠️ به‌روزرسانی فهرست ناموفق بود (' + data.refreshError + ')؛ فهرست ذخیره‌شده نمایش داده شد.');
+    setMsg($('modelMsg'), parts.join(' — '), data.refreshError ? 'err' : null);
+  } catch (e) {
+    setMsg($('modelMsg'), e.message, 'err');
+  }
+}
+
 async function loadStatus() {
   const box = $('statusBox');
   try {
@@ -223,6 +267,7 @@ async function loadStatus() {
       ['آخرین خلاصه‌سازی', faDate(s.messages.lastSummarizedAt), ''],
       ['آخرین انتشار', faDate(s.messages.lastPublishedAt), ''],
       ['مدل رایگان فعال', s.ai.model || '—', s.ai.model ? 'good' : 'warn'],
+      ['نحوه انتخاب مدل', s.ai.pinnedModel ? 'دستی (' + s.ai.pinnedModel + ')' : 'خودکار', ''],
       ['تعداد مدل‌های رایگان', s.ai.freeModelsCached, ''],
       ['آخرین به‌روزرسانی فهرست مدل‌ها', faDate(s.ai.lastModelRefreshAt), ''],
       ['کانال مقصد', s.publishing.destinationConfigured ? 'تنظیم شده' : 'تنظیم نشده', s.publishing.destinationConfigured ? 'good' : 'bad'],
@@ -305,6 +350,7 @@ $('loginBtn').onclick = async () => {
     await loadChannels();
     await loadStatus();
     await loadSettings();
+    await loadModels(false);
   } catch (e) { setMsg($('loginMsg'), e.message, 'err'); }
   btn.disabled = false;
 };
@@ -338,6 +384,27 @@ $('refreshStatus').onclick = async () => {
   btn.disabled = false;
 };
 
+$('saveModelBtn').onclick = async () => {
+  const btn = $('saveModelBtn');
+  btn.disabled = true;
+  const value = $('modelSelect').value;
+  try {
+    const data = await api('/api/models', { method: 'POST', body: JSON.stringify({ model: value || null }) });
+    modelCatalog = data;
+    setMsg($('modelMsg'), data.pinned ? '✅ مدل «' + data.pinned + '» انتخاب شد.' : '✅ انتخاب مدل روی حالت خودکار تنظیم شد.', 'ok');
+    loadStatus();
+  } catch (e) { setMsg($('modelMsg'), e.message, 'err'); }
+  btn.disabled = false;
+};
+
+$('refreshModelsBtn').onclick = async () => {
+  const btn = $('refreshModelsBtn');
+  btn.disabled = true;
+  setMsg($('modelMsg'), 'در حال دریافت فهرست مدل‌های رایگان…', null);
+  await loadModels(true);
+  btn.disabled = false;
+};
+
 // Collection-only mode is persisted server-side (ai_settings) and takes effect
 // on the very next hourly run: raw news is stored, nothing is processed/sent.
 $('modeToggle').addEventListener('change', async () => {
@@ -357,6 +424,31 @@ $('modeToggle').addEventListener('change', async () => {
   $('modeToggle').disabled = false;
   syncModeBanner();
 });
+
+// Safe, human-readable Persian labels for the server's error categories.
+function aiErrorLabel(category) {
+  const map = {
+    config_missing: 'کلید API تنظیم نشده',
+    no_free_model: 'مدل رایگانی در دسترس نیست',
+    rate_limited: 'محدودیت نرخ درخواست',
+    provider_error: 'خطای سرویس‌دهنده مدل',
+    invalid_response: 'پاسخ نامعتبر مدل (JSON خراب)',
+    timeout: 'اتمام زمان انتظار',
+    network: 'خطای شبکه',
+    empty_after_filter: 'متن پس از فیلتر خالی شد',
+  };
+  return map[category] || category;
+}
+
+function imageReasonLabel(reason) {
+  const map = {
+    browser_binding_missing: 'اتصال Browser Run تنظیم نشده است',
+    no_suitable_items: 'خبری مناسب برای تصویر وجود نداشت',
+    render_failed: 'ساخت تصویر ناموفق بود',
+    send_failed: 'ارسال تصویر به تلگرام ناموفق بود',
+  };
+  return map[reason] || reason || 'نامشخص';
+}
 
 function showRunLog(lines) {
   const pre = $('toolsLog');
@@ -382,12 +474,25 @@ async function runPipeline(mode, btn) {
       lines.push('تبلیغات فیلترشده: ' + r.filteredAdvertisements);
       if (r.summarization) {
         lines.push('خلاصه‌سازی: ' + r.summarization.summarized + ' از ' + r.summarization.eligible + (r.summarization.model ? ' — مدل: ' + r.summarization.model : '') + (r.summarization.failed > 0 ? ' (' + r.summarization.failed + ' خطا)' : ''));
+        const cats = r.summarization.failureCategories || {};
+        const catKeys = Object.keys(cats);
+        if (catKeys.length > 0) {
+          lines.push('علت خطاهای خلاصه‌سازی: ' + catKeys.map((k) => aiErrorLabel(k) + ' (' + cats[k] + ')').join('، '));
+        }
+        if (r.summarization.abandonedModels && r.summarization.abandonedModels.length > 0) {
+          lines.push('مدل‌های کنارگذاشته‌شده: ' + r.summarization.abandonedModels.join('، '));
+        }
       }
       if (r.ranking) {
         lines.push('رتبه‌بندی: ' + r.ranking.important + ' خبر مهم از ' + r.ranking.ranked);
       }
       if (r.publishing) {
         lines.push('انتشار: ' + r.publishing.published + ' از ' + r.publishing.eligible + (r.publishing.bale ? ' — بیل: ' + r.publishing.bale.sent + ' ارسال' : ''));
+        if (r.publishing.image) {
+          lines.push('تصویر خبری: ' + (r.publishing.image.sent
+            ? 'ارسال شد (' + r.publishing.image.cards + ' کارت)'
+            : 'ارسال نشد — ' + imageReasonLabel(r.publishing.image.reason)));
+        }
       }
     } else {
       lines.push('پردازش انجام نشد — در این حالت فقط اخبار خام ذخیره می‌شوند.');
@@ -446,6 +551,7 @@ setInterval(() => { if (!$('appView').classList.contains('hidden')) loadStatus()
     await loadChannels();
     await loadStatus();
     await loadSettings();
+    await loadModels(false);
   }
   catch { showLogin(); }
 })();

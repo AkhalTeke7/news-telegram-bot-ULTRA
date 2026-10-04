@@ -271,7 +271,7 @@ describe('global ranking', () => {
     ]);
   });
 
-  it('keeps omitted candidates at the lowest score instead of dropping them', () => {
+  it('keeps omitted candidates at a neutral score instead of dropping them', () => {
     const items = [
       { id: 1, title: 'a', summary: 'a' },
       { id: 2, title: 'b', summary: 'b' },
@@ -280,8 +280,10 @@ describe('global ranking', () => {
     const ranked = parseRanking('[{"i":1,"importance":4}]', items);
     expect(ranked).toHaveLength(3);
     expect(ranked.find((r) => r.id === 2)?.importance).toBe(4);
-    expect(ranked.find((r) => r.id === 1)?.importance).toBe(1);
-    expect(ranked.find((r) => r.id === 3)?.importance).toBe(1);
+    // Not 1: importance 1 means "do not publish" and would drop the row from
+    // the run image, which a partial answer must never do.
+    expect(ranked.find((r) => r.id === 1)?.importance).toBe(2);
+    expect(ranked.find((r) => r.id === 3)?.importance).toBe(2);
   });
 
   it('ranks globally and produces exactly four selected items', async () => {
