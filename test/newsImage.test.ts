@@ -244,9 +244,18 @@ describe('news selection', () => {
     const items = [
       row({ id: 1, summaryText: '   ', importance: 5 }),
       row({ id: 2, summaryText: '', importance: 5 }),
-      row({ id: 3, summaryText: 'خبر معتبر.', importance: 1 }),
+      row({ id: 3, summaryText: 'خبر معتبر.', importance: 4 }),
     ];
     expect(selectTopNews(items).map((i) => i.id)).toEqual([3]);
+  });
+
+  it('excludes items the AI scored 1, keeping null-scored legacy rows', () => {
+    const items = [
+      row({ id: 1, summaryText: 'خبر کم‌اهمیت.', importance: 1 }),
+      row({ id: 2, summaryText: 'خبر بدون امتیاز.', importance: null }),
+      row({ id: 3, summaryText: 'خبر مهم.', importance: 3 }),
+    ];
+    expect(selectTopNews(items).map((i) => i.id)).toEqual([3, 2]);
   });
 
   it('is deterministic for equal importance and equal dates', () => {
@@ -565,7 +574,8 @@ describe('runPublishing image integration', () => {
     await env.DB.prepare(`UPDATE messages SET importance = 5 WHERE source_channel_id = ?1`)
       .bind(b)
       .run();
-    await env.DB.prepare(`UPDATE messages SET importance = 1 WHERE source_channel_id = ?1`)
+    // Score 2, not 1: a score of 1 would exclude the row from the image entirely.
+    await env.DB.prepare(`UPDATE messages SET importance = 2 WHERE source_channel_id = ?1`)
       .bind(a)
       .run();
 
