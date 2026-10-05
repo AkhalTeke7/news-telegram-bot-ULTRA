@@ -38,6 +38,7 @@ import {
   TEST_MESSAGE_COMMAND,
   type TestMessageResult,
 } from './testMessage';
+import { buildJobStatusReport, STATUS_COMMAND } from './jobStatus';
 import {
   handleSlideshowCallback,
   handleSlideshowCommand,
@@ -766,6 +767,16 @@ async function handleMessage(message: TelegramMessage, env: Env, deps: { send: S
   if (text === TEST_IMAGE_COMMAND || text === `${TEST_IMAGE_COMMAND}@${env.TELEGRAM_BOT_USERNAME ?? ''}`) {
     const result = await sendTestImage(env);
     await deps.send(chatId, renderTestImageResult(result), menuKeyboard());
+    return;
+  }
+
+  // Admin-only report on the scheduled jobs. Runs before the pending-state
+  // checks, like /test and /testimage, so it is always a command.
+  if (text === STATUS_COMMAND || text === `${STATUS_COMMAND}@${env.TELEGRAM_BOT_USERNAME ?? ''}`) {
+    const report = await buildJobStatusReport(env).catch(
+      () => '❌ تهیهٔ گزارش وضعیت ممکن نشد.'
+    );
+    await deps.send(chatId, report, menuKeyboard());
     return;
   }
 

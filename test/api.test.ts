@@ -555,13 +555,15 @@ describe('cron', () => {
     await env.DB.prepare(`DELETE FROM ai_settings`).run();
   });
 
-  it('records an hourly execution and stores no messages', async () => {
+  it('records a pipeline execution and stores no messages', async () => {
     const before = await env.DB.prepare(`SELECT COUNT(*) AS n FROM cron_runs`).first<{ n: number }>();
     expect(before?.n).toBe(0);
 
     const ctx = createExecutionContext();
     await worker.scheduled!(
-      createScheduledController({ cron: '0 * * * *', scheduledTime: Date.now() }),
+      // Must be the real pipeline trigger: src/scheduler.ts routes by cron
+      // expression, so an unknown expression is deliberately a no-op.
+      createScheduledController({ cron: '30 */2 * * *', scheduledTime: Date.now() }),
       env,
       ctx
     );
@@ -573,7 +575,7 @@ describe('cron', () => {
     const row = await env.DB.prepare(
       `SELECT trigger_name FROM cron_runs ORDER BY id DESC LIMIT 1`
     ).first<{ trigger_name: string }>();
-    expect(row?.trigger_name).toBe('0 * * * *');
+    expect(row?.trigger_name).toBe('30 */2 * * *');
   });
 
   it('collection-only mode records a successful collect-only run with no processing', async () => {

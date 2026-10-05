@@ -290,7 +290,7 @@ describe('pipeline integration', () => {
 
     const ctx = createExecutionContext();
     await worker.scheduled!(
-      createScheduledController({ cron: '0 * * * *', scheduledTime: Date.now() }),
+      createScheduledController({ cron: '30 */2 * * *', scheduledTime: Date.now() }),
       testEnv(),
       ctx
     );

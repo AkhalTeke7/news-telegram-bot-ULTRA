@@ -204,7 +204,8 @@ describe('cron stage isolation', () => {
   const run = async () => {
     const ctx = createExecutionContext();
     await worker.scheduled!(
-      createScheduledController({ cron: '0 * * * *', scheduledTime: NOW }),
+      // The pipeline cron from wrangler.json; see src/scheduler.ts.
+      createScheduledController({ cron: '30 */2 * * *', scheduledTime: NOW }),
       env,
       ctx
     );
@@ -222,7 +223,7 @@ describe('cron stage isolation', () => {
     expect(last!.finishedAt).toBeTruthy();
     expect(last!.durationMs).not.toBeNull();
     expect(last!.messagesPublished).toBe(0);
-    expect(last!.triggerName).toBe('0 * * * *');
+    expect(last!.triggerName).toBe('30 */2 * * *');
   });
 
   it('writes one bookkeeping row per run and never duplicates messages', async () => {

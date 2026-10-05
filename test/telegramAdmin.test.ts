@@ -668,13 +668,41 @@ it('registers the manual pipeline with the execution context instead of firing a
 
 /* -------------------------------------------------------- shared pipeline */
 
+describe('/status command', () => {
+  it('renders the scheduled-job report for the admin', async () => {
+    const r = recorder();
+    await handleTelegramUpdate(msg('/status') as TelegramUpdate, baseEnv(), undefined, r);
+    expect(r.sent).toHaveLength(1);
+    expect(r.sent[0].text).toContain('وضعیت کارهای زمان‌بندی‌شده');
+    expect(r.sent[0].text).toContain('اخبار فوری');
+    expect(r.sent[0].text.length).toBeLessThanOrEqual(4096);
+  });
+
+  it('is admin-only, like every other command', async () => {
+    const r = recorder();
+    await handleTelegramUpdate(msg('/status', OTHER_ID) as TelegramUpdate, baseEnv(), undefined, r);
+    expect(r.sent[0].text).toBe(UNAUTHORIZED_MESSAGE);
+    expect(r.sent[0].text).not.toContain('وضعیت');
+  });
+
+  it('never leaves a pending state behind', async () => {
+    const r = recorder();
+    await setAdminState(env.DB, { chatId: 100, userId: ADMIN_ID, action: 'await_channel' });
+    await handleTelegramUpdate(msg('/status') as TelegramUpdate, baseEnv(), undefined, r);
+    // /status is a command, so it must not be swallowed as the answer to a
+    // pending prompt.
+    expect(r.sent[0].text).toContain('وضعیت کارهای زمان‌بندی‌شده');
+    expect(await getAdminState(env.DB, 100)).not.toBeNull();
+  });
+});
+
 describe('shared pipeline', () => {
   it('the scheduled handler uses the same pipeline', async () => {
     // No channels seeded: collection must stay offline so this test is
     // deterministic and never touches the network.
     const ctx = createExecutionContext();
     await worker.scheduled!(
-      createScheduledController({ cron: '0 * * * *', scheduledTime: Date.now() }),
+      createScheduledController({ cron: '30 */2 * * *', scheduledTime: Date.now() }),
       baseEnv(),
       ctx
     );
@@ -685,7 +713,7 @@ describe('shared pipeline', () => {
       finished_at: string | null;
     }>();
     expect(rows.results).toHaveLength(1);
-    expect(rows.results[0].trigger_name).toBe('0 * * * *');
+    expect(rows.results[0].trigger_name).toBe('30 */2 * * *');
     expect(rows.results[0].finished_at).not.toBeNull();
   });
 
