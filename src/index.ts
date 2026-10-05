@@ -1,5 +1,5 @@
 import { createApi } from './api';
-import { runNewsPipeline } from './pipeline';
+import { dispatchScheduled } from './scheduler';
 import type { Env } from './types';
 import { APP_HTML } from './ui';
 import { buildImageHtml, buildSlideFrame, type ImageNewsItem } from './newsImage';
@@ -64,32 +64,26 @@ export default {
   },
 
   /**
-   * Bi-hourly trigger: minute 30 of every other UTC hour, configured in
-   * `wrangler.json` under `triggers.crons`.
+   * All four Cron Triggers land here; `controller.cron` says which fired.
    *
-   * Cloudflare Cron Triggers are UTC-only ("Cron Triggers execute on UTC time")
-   * and have no timezone field. Iran is a fixed UTC+03:30 with no daylight
-   * saving, so every Iranian hour boundary falls on a UTC `:30` — therefore
-   * minute 30 of every other UTC hour is exactly the start of every other
-   * Iranian hour. e.g. 20:30 UTC -> 00:00 Tehran, 22:30 UTC -> 02:00 Tehran.
-   * The collector's window is two hours for the same reason (see
-   * DEFAULT_WINDOW_MS), so no hour of news is skipped.
+   * Cloudflare Cron Triggers are UTC-only ("Cron Triggers execute on UTC
+   * time") and have no timezone field. Iran is a fixed UTC+03:30 with no
+   * daylight saving, so every Iranian hour boundary falls on a UTC `:30`.
    *
-   * Delegates to the same runNewsPipeline() the Telegram manual run uses.
+   *   30 *&#47;2 * * *  -> news digest pipeline, every other Iranian hour
+   *                   (20:30 UTC -> 00:00 Tehran). The collector's window is
+   *                   two hours for the same reason, so no hour is skipped.
+   *   *&#47;5 * * * *   -> breaking-news scan
+   *   30 4 * * *   -> Forex Factory red list, 08:00 Tehran
+   *   0 *&#47;3 * * *   -> news slideshow (minute 0, so it never collides
+   *                   with the :30 pipeline run)
+   *
+   * `dispatchScheduled` routes on that expression and wraps each job in its
+   * own try/catch inside its own `ctx.waitUntil`, so one failing job can
+   * never stop another — and an unknown expression does nothing loudly
+   * instead of silently running the wrong job.
    */
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(
-      runNewsPipeline(env.DB, env, { trigger: controller.cron }).catch((error: unknown) => {
-        console.error(
-          JSON.stringify({
-            event: 'cron',
-            cron: controller.cron,
-            status: 'error',
-            error: error instanceof Error ? error.message : String(error),
-            timestamp: new Date().toISOString(),
-          })
-        );
-      })
-    );
+    dispatchScheduled(controller, env, ctx);
   },
 } satisfies ExportedHandler<Env>;

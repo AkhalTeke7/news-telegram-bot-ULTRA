@@ -31,3 +31,58 @@ AI_REQUEST_PACE_MS=""
 # Wait between two album slide renders, honoring the Browser Run free-tier
 # limit of ~1 Quick Action per 10 seconds. Default 10500.
 IMAGE_RENDER_SPACING_MS=""
+
+# ---------------------------------------------------------------------------
+# Scheduled jobs (slideshow / Forex Factory calendar / breaking news)
+# ---------------------------------------------------------------------------
+
+# --- LLM providers -----------------------------------------------------------
+# The router tries providers in order and falls through on any failure, so one
+# dead key never takes a feature down. Each is OPTIONAL: configure as many or
+# as few as you like. With none configured the jobs still run, just without
+# keyword highlighting, translation and impact analysis.
+# Deploy with: npx wrangler secret put <NAME>
+#
+# NVIDIA NIM - https://build.nvidia.com  (key starts with "nvapi-")
+NVIDIA_API_KEY=""
+# OpenCode Zen - https://opencode.ai/auth
+# NOTE: deliberately NOT named OPENCODE_API_KEY. That name is already taken
+# above as the legacy OpenRouter alias, and reusing it would silently send
+# OpenRouter traffic to OpenCode.
+OPENCODE_ZEN_API_KEY=""
+# Kilo AI Gateway - https://kilo.ai
+KILO_API_KEY=""
+# Comma-separated preference order. Default: nvidia,opencode,kilo,openrouter
+LLM_PROVIDER_ORDER=""
+# Optional per-provider model overrides (sensible defaults are built in).
+NVIDIA_MODEL=""
+OPENCODE_MODEL=""
+KILO_MODEL=""
+OPENROUTER_MODEL=""
+# Hard cap on LLM calls per LOCAL day across every job. Default 60.
+LLM_DAILY_BUDGET=""
+
+# --- General ------------------------------------------------------------------
+# IANA timezone used for "today", Jalali dates and the daily calendar window.
+# Set in wrangler.json vars; override here for local testing. Default Asia/Tehran.
+TIMEZONE="Asia/Tehran"
+# Brand name printed in the slide footer. Default: اخبار فوری
+BRAND_NAME=""
+
+# --- Slideshow ---------------------------------------------------------------
+# Slides per run. Telegram albums hold at most 10, which is also the default.
+SLIDESHOW_MAX_ITEMS=""
+
+# --- Breaking news -----------------------------------------------------------
+# Minimum LLM score (0-10) required to send an alert. Default 8.
+BREAKING_MIN_SCORE=""
+# Maximum alerts per local day. Default 8.
+BREAKING_DAILY_CAP=""
+
+# --- Security writeup digest (Task 6) -----------------------------------------
+# SEPARATE channel for the English bug-bounty / exploit digest. Leave it empty
+# and the job never publishes anything — it will not fall back to the finance
+# channel. Accepts "@channel_username", a numeric id like "-1001234567890",
+# or the literal "MAIN" to reuse TELEGRAM_DESTINATION_CHANNEL.
+# For the deployed Worker use: npx wrangler secret put TELEGRAM_SECURITY_CHANNEL
+TELEGRAM_SECURITY_CHANNEL=""

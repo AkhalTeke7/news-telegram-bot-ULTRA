@@ -38,6 +38,12 @@ import {
   TEST_MESSAGE_COMMAND,
   type TestMessageResult,
 } from './testMessage';
+import { buildJobStatusReport, STATUS_COMMAND } from './jobStatus';
+import {
+  handleSlideshowCallback,
+  handleSlideshowCommand,
+  SLIDESHOW_COMMAND,
+} from './slideshow/browse';
 import { formatTehranDateTimeOrDash } from './time';
 import type { Env } from './types';
 
@@ -616,7 +622,7 @@ export function parseCallbackData(raw: unknown): ParsedCallback | null {
   const action = parts[0];
   if (!action) return null;
 
-  const ALLOWED = new Set(['menu', 'no', 'ch', 'sys', 'run', 'msg', 'img', 'mdl']);
+  const ALLOWED = new Set(['menu', 'no', 'ch', 'sys', 'run', 'msg', 'img', 'mdl', 'ss']);
   if (!ALLOWED.has(action)) return null;
 
   const sub = parts[1] ?? '';
@@ -640,6 +646,8 @@ export function parseCallbackData(raw: unknown): ParsedCallback | null {
   if (action === 'mdl' && ['list', 'auto', 'refresh'].includes(sub)) {
     return { action: `mdl:${sub}`, arg: null };
   }
+  // Slideshow browser (private chat only): prev / next / counter no-op.
+  if (action === 'ss' && ['prev', 'next', 'noop'].includes(sub)) return { action: `ss:${sub}`, arg: null };
   if (action === 'msg' && sub === 'test') return { action: 'msg:test', arg: null };
   if (action === 'img' && sub === 'test') return { action: 'img:test', arg: null };
   if (action === 'menu' || action === 'no') return { action, arg: null };
@@ -654,7 +662,8 @@ interface TelegramUser {
 
 interface TelegramMessage {
   message_id: number;
-  chat: { id: number };
+  /** `type` tells a private chat from a group/channel; absent in old fixtures. */
+  chat: { id: number; type?: string };
   from?: TelegramUser;
   text?: string;
 }
@@ -761,6 +770,34 @@ async function handleMessage(message: TelegramMessage, env: Env, deps: { send: S
     return;
   }
 
+  // Admin-only report on the scheduled jobs. Runs before the pending-state
+  // checks, like /test and /testimage, so it is always a command.
+  if (text === STATUS_COMMAND || text === `${STATUS_COMMAND}@${env.TELEGRAM_BOT_USERNAME ?? ''}`) {
+    const report = await buildJobStatusReport(env).catch(
+      () => '❌ تهیهٔ گزارش وضعیت ممکن نشد.'
+    );
+    await deps.send(chatId, report, menuKeyboard());
+    return;
+  }
+
+  // Private-chat slideshow browser. Explicitly NOT offered in groups or the
+  // channel: inline buttons belong to the admin's own chat only.
+  if (text === SLIDESHOW_COMMAND || text === `${SLIDESHOW_COMMAND}@${env.TELEGRAM_BOT_USERNAME ?? ''}`) {
+    const isPrivate = (message.chat.type ?? 'private') === 'private';
+    if (!isPrivate) {
+      await deps.send(chatId, 'این فرمان فقط در گفت‌وگوی خصوصی کار می‌کند.');
+      return;
+    }
+    await handleSlideshowCommand({
+      token: env.TELEGRAM_BOT_TOKEN ?? '',
+      db: env.DB,
+      kv: env.KV,
+      chatId: message.chat.id,
+      isPrivateChat: true,
+    });
+    return;
+  }
+
   const state = await getAdminState(env.DB, message.chat.id);
 
   if (state?.action === 'await_channel') {
@@ -828,6 +865,20 @@ async function handleCallback(
   };
 
   switch (parsed.action) {
+    case 'ss:prev':
+    case 'ss:next':
+    case 'ss:noop': {
+      // handleSlideshowCallback answers the query itself (including on error).
+      await handleSlideshowCallback({
+        token,
+        kv: env.KV,
+        chatId: query.message!.chat.id,
+        messageId,
+        callbackQueryId: query.id,
+        action: parsed.action.slice(3),
+      });
+      return;
+    }
     case 'menu': {
       await ack();
       await clearAdminState(env.DB, query.message!.chat.id);

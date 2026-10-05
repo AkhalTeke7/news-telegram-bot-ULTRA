@@ -30,6 +30,13 @@ export interface Env {
   TELEGRAM_DESTINATION_CHANNEL?: string;
   /** Numeric Telegram User.id allowed to administer the bot. Secret. */
   TELEGRAM_ADMIN_USER_ID?: string;
+  /**
+   * Destination for the English security / bug-bounty writeup digest:
+   * "@channel_username", a numeric channel id, or the literal "MAIN" to reuse
+   * TELEGRAM_DESTINATION_CHANNEL. Unset means the digest never publishes, so
+   * a missing secret can never leak security posts into the finance channel.
+   */
+  TELEGRAM_SECURITY_CHANNEL?: string;
   /** X-Telegram-Bot-Api-Secret-Token shared with Telegram. Secret. */
   TELEGRAM_WEBHOOK_SECRET?: string;
   /** Optional bot username, used only to recognize /start@botname. */
@@ -46,6 +53,62 @@ export interface Env {
    * seconds. Default 10500. Plain var, not a secret.
    */
   IMAGE_RENDER_SPACING_MS?: string;
+
+  /* ------------------------------------------------- scheduled jobs (new) -- */
+
+  /**
+   * Workers KV. Holds the Forex Factory response cache and the 30-minute
+   * /slideshow navigation sessions. Optional: without it the calendar job
+   * simply calls the source every run and /slideshow is disabled, rather than
+   * the Worker failing to boot.
+   */
+  KV?: KVNamespace;
+  /**
+   * R2 bucket for rendered slide PNGs. Optional and purely an archive: slides
+   * are sent to Telegram from memory and the send never depends on R2.
+   */
+  MEDIA?: R2Bucket;
+
+  /** IANA timezone for "today", local times and Jalali dates. Default Asia/Tehran. */
+  TIMEZONE?: string;
+  /** Brand name shown in the slide footer. Default «اخبار فوری». */
+  BRAND_NAME?: string;
+
+  /* ------------------------------------------------------- LLM providers -- */
+
+  /** NVIDIA NIM key (starts `nvapi-`). Secret. */
+  NVIDIA_API_KEY?: string;
+  /** Model id for NVIDIA NIM, e.g. `meta/llama-3.3-70b-instruct`. */
+  NVIDIA_MODEL?: string;
+  /**
+   * OpenCode Zen key. Deliberately NOT `OPENCODE_API_KEY`: that name is a
+   * legacy alias for an OpenRouter key elsewhere in this repo.
+   */
+  OPENCODE_ZEN_API_KEY?: string;
+  OPENCODE_ZEN_MODEL?: string;
+  /** Kilo Gateway key. Secret. */
+  KILO_API_KEY?: string;
+  KILO_MODEL?: string;
+  /** Explicit model for OpenRouter in the NEW jobs only. */
+  OPENROUTER_MODEL?: string;
+  /** Comma-separated attempt order, e.g. `nvidia,kilo,openrouter`. */
+  LLM_PROVIDER_ORDER?: string;
+  /** Max LLM calls per local day across all new jobs. Default 60. */
+  LLM_DAILY_BUDGET?: string;
+
+  /* ------------------------------------------------------------- jobs ----- */
+
+  /** Minimum LLM score (0-10) required to send a breaking alert. Default 8. */
+  BREAKING_MIN_SCORE?: string;
+  /** Max breaking alerts per local day. Default 8. */
+  BREAKING_DAILY_CAP?: string;
+  /** Max slides per slideshow run. Default 10 (Telegram album maximum). */
+  SLIDESHOW_MAX_ITEMS?: string;
+  /**
+   * Numeric Telegram User.id for admin-only commands. Alias of
+   * TELEGRAM_ADMIN_USER_ID; whichever is set wins.
+   */
+  ADMIN_ID?: string;
 }
 
 // Lets `cloudflare:test` type `env` without re-declaring the binding shape.
