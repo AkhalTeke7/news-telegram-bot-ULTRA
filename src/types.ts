@@ -30,6 +30,13 @@ export interface Env {
   TELEGRAM_DESTINATION_CHANNEL?: string;
   /** Numeric Telegram User.id allowed to administer the bot. Secret. */
   TELEGRAM_ADMIN_USER_ID?: string;
+  /**
+   * Destination for the English security / bug-bounty writeup digest:
+   * "@channel_username", a numeric channel id, or the literal "MAIN" to reuse
+   * TELEGRAM_DESTINATION_CHANNEL. Unset means the digest never publishes, so
+   * a missing secret can never leak security posts into the finance channel.
+   */
+  TELEGRAM_SECURITY_CHANNEL?: string;
   /** X-Telegram-Bot-Api-Secret-Token shared with Telegram. Secret. */
   TELEGRAM_WEBHOOK_SECRET?: string;
   /** Optional bot username, used only to recognize /start@botname. */

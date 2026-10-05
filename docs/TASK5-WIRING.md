@@ -35,6 +35,7 @@ Single source of truth for cron → job:
 | `*/5 * * * *`  | `breaking` | every 5 min | Task 3 |
 | `30 4 * * *`   | `calendar` | **08:00** | Task 2 |
 | `0 */3 * * *`  | `slideshow`| 03:30, 06:30, … | Task 1 |
+| `30 16 * * *`  | `security` | **20:00** | Task 6 — English writeup digest |
 
 Guarantees:
 
@@ -99,6 +100,7 @@ command). Example output:
    */5 * * * * — اخبار فوری
    30 4 * * * — تقویم اقتصادی
    0 */3 * * * — اسلایدشو
+   30 16 * * * — دایجست امنیتی
 ```
 
 Notes:
@@ -199,6 +201,7 @@ npx wrangler secret put TELEGRAM_DESTINATION_CHANNEL # @channel or -100…
 npx wrangler secret put TELEGRAM_ADMIN_USER_ID      # numeric User.id, digits only
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET     # openssl rand -hex 24
 npx wrangler secret put ADMIN_PASSWORD              # web UI
+npx wrangler secret put TELEGRAM_SECURITY_CHANNEL   # Task 6 digest; omit to disable
 ```
 
 **At least one LLM provider** (the router tries them in order and falls through
@@ -281,14 +284,19 @@ npx wrangler triggers deploy          # re-sync triggers without a code deploy
 ```
 
 Dashboard: **Workers & Pages → news-telegram-bot → Settings → Triggers → Cron
-Triggers**. You must see exactly four, and they must match `CRON_ROUTES`:
+Triggers**. You must see exactly five, and they must match `CRON_ROUTES`:
 
 ```
 30 */2 * * *
 */5 * * * *
 30 4 * * *
 0 */3 * * *
+30 16 * * *
 ```
+
+> This is the **full free-plan allowance of 5 Cron Triggers per account**. A
+> sixth scheduled job cannot be added without either folding it into an
+> existing trigger or moving to the paid plan.
 
 > Cron Triggers are **UTC only** — there is no timezone field. `30 4 * * *` is
 > 08:00 Tehran because Iran has been a fixed UTC+03:30 with no daylight saving

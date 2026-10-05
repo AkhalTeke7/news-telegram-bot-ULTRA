@@ -78,3 +78,11 @@ SLIDESHOW_MAX_ITEMS=""
 BREAKING_MIN_SCORE=""
 # Maximum alerts per local day. Default 8.
 BREAKING_DAILY_CAP=""
+
+# --- Security writeup digest (Task 6) -----------------------------------------
+# SEPARATE channel for the English bug-bounty / exploit digest. Leave it empty
+# and the job never publishes anything — it will not fall back to the finance
+# channel. Accepts "@channel_username", a numeric id like "-1001234567890",
+# or the literal "MAIN" to reuse TELEGRAM_DESTINATION_CHANNEL.
+# For the deployed Worker use: npx wrangler secret put TELEGRAM_SECURITY_CHANNEL
+TELEGRAM_SECURITY_CHANNEL=""

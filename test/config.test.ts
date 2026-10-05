@@ -8,6 +8,7 @@ describe('wrangler config', () => {
       '*/5 * * * *', // breaking-news scan
       '30 4 * * *', // Forex Factory daily list -> 08:00 Asia/Tehran
       '0 */3 * * *', // slideshow
+      '30 16 * * *', // security writeup digest -> 20:00 Asia/Tehran
     ]);
   });
 

@@ -23,6 +23,7 @@ import { runCalendarJob } from './calendar/job';
 import { finishJobRun, startJobRun, type JobName, type JobStatus } from './lib/jobs';
 import { describeError } from './lib/http';
 import { runNewsPipeline } from './pipeline';
+import { runSecurityJob } from './security/job';
 import { runSlideshowJob } from './slideshow/job';
 import type { Env } from './types';
 
@@ -31,6 +32,8 @@ export const PIPELINE_CRON = '30 */2 * * *';
 export const BREAKING_CRON = '*/5 * * * *';
 export const CALENDAR_CRON = '30 4 * * *';
 export const SLIDESHOW_CRON = '0 */3 * * *';
+/** Security writeup digest, 20:00 Tehran. Uses the 5th and last free slot. */
+export const SECURITY_CRON = '30 16 * * *';
 
 export type ScheduledJobName = JobName | 'pipeline';
 
@@ -45,6 +48,7 @@ export const CRON_ROUTES: Record<string, ScheduledJobName> = {
   [BREAKING_CRON]: 'breaking',
   [CALENDAR_CRON]: 'calendar',
   [SLIDESHOW_CRON]: 'slideshow',
+  [SECURITY_CRON]: 'security',
 };
 
 /** Normalizes whitespace so a stray double space cannot orphan a trigger. */
@@ -114,6 +118,23 @@ export async function runScheduledJob(
         detail = [
           `events=${result.events}`,
           `analyzed=${result.analyzed}`,
+          `messages=${result.messages}`,
+          result.alreadyClaimed ? 'claimed_elsewhere' : '',
+          result.reason ? `reason=${result.reason}` : '',
+        ]
+          .filter(Boolean)
+          .join(' ');
+        break;
+      }
+      case 'security': {
+        const result = await runSecurityJob(env);
+        status = result.status;
+        detail = [
+          `feeds=${result.feedsOk}/${result.feedsOk + result.feedsFailed}`,
+          `items=${result.items}`,
+          `candidates=${result.candidates}`,
+          `fresh=${result.fresh}`,
+          `selected=${result.selected}`,
           `messages=${result.messages}`,
           result.alreadyClaimed ? 'claimed_elsewhere' : '',
           result.reason ? `reason=${result.reason}` : '',

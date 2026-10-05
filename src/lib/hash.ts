@@ -23,6 +23,8 @@ const TRACKING_PARAMS = [
   'at_medium', 'at_campaign', 'at_custom1', 'at_custom2', 'at_custom3', 'at_custom4',
   'fbclid', 'gclid', 'mc_cid', 'mc_eid', 'igshid', 'ref', 'ref_src',
   'traffic_source', 'mod', 'cmpid', 'smid', 'partner', '__source',
+  // Medium: `?source=rss----7b722bfd1b8d---4` and `?sk=` friend links.
+  'source', 'sk',
 ];
 
 /**

@@ -12,6 +12,7 @@ import editorialSql from '../migrations/0009_ai_editorial_metadata.sql?raw';
 import rssSourcesSql from '../migrations/0010_rss_sources.sql?raw';
 import rssChannelSql from '../migrations/0011_rss_channel_metadata.sql?raw';
 import scheduledJobsSql from '../migrations/0012_scheduled_jobs.sql?raw';
+import securityDigestSql from '../migrations/0013_security_digest.sql?raw';
 
 // ponytail: strips `--` comments, then splits on `;`. Still assumes no
 // semicolons inside string literals in migration files; add a real SQL splitter
@@ -37,6 +38,7 @@ beforeAll(async () => {
     { name: '0010_rss_sources.sql', queries: toQueries(rssSourcesSql) },
     { name: '0011_rss_channel_metadata.sql', queries: toQueries(rssChannelSql) },
     { name: '0012_scheduled_jobs.sql', queries: toQueries(scheduledJobsSql) },
+    { name: '0013_security_digest.sql', queries: toQueries(securityDigestSql) },
   ]);
 
   // Migration 0010 seeds default RSS sources (BBC Persian, ...). They must stay

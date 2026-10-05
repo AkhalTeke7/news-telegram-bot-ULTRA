@@ -133,10 +133,15 @@ export function parseFeed(xml: string): FeedEntry[] {
     const title = tagText(block, 'title').slice(0, MAX_TITLE);
     const link = extractLink(block);
     if (!title || !link) continue;
-    const description = (tagText(block, 'description') || tagText(block, 'summary') || '').slice(
-      0,
-      MAX_DESCRIPTION
-    );
+    // `content` last: GitHub's commit Atom feeds carry the full commit
+    // message there and have neither <description> nor <summary>. For every
+    // other feed the first two win, so this only ever adds information.
+    const description = (
+      tagText(block, 'description') ||
+      tagText(block, 'summary') ||
+      tagText(block, 'content') ||
+      ''
+    ).slice(0, MAX_DESCRIPTION);
     entries.push({ title, link, description, publishedAt: parseFeedDate(block) });
   }
   return entries;

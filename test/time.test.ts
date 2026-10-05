@@ -45,14 +45,24 @@ describe('cron schedule', () => {
   });
 
   it('declares the scheduled jobs and stays inside the 5-trigger account limit', () => {
-    // Workers Free allows 5 Cron Triggers per account; we use 4.
+    // Workers Free allows 5 Cron Triggers per account, and we now use all 5.
+    // A sixth job must either share a trigger or move to the paid plan.
     expect(CRON.length).toBeLessThanOrEqual(5);
     expect(CRON).toEqual([
       PIPELINE_CRON, // existing news digest
       '*/5 * * * *', // breaking-news scan
       '30 4 * * *', // Forex Factory daily list — 08:00 Asia/Tehran
       '0 */3 * * *', // slideshow, offset off :30 so it never collides
+      '30 16 * * *', // security writeup digest — 20:00 Asia/Tehran
     ]);
+  });
+
+  it('fires the security digest at 20:00 Tehran time', () => {
+    // 16:30 UTC + 03:30 == 20:00 local, every day.
+    const instant = new Date(Date.UTC(2026, 0, 15, 16, 30, 0));
+    const tehran = tehranParts(instant)!;
+    expect(tehran.hour).toBe(20);
+    expect(tehran.minute).toBe(0);
   });
 
   it('fires the daily calendar job at 08:00 Tehran time', () => {

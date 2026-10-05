@@ -10,7 +10,7 @@
 
 import { localDateKey } from './jalali';
 
-export type JobName = 'breaking' | 'calendar' | 'slideshow';
+export type JobName = 'breaking' | 'calendar' | 'slideshow' | 'security';
 
 export type JobStatus = 'running' | 'success' | 'skipped' | 'partial' | 'failed';
 

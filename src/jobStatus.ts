@@ -9,7 +9,13 @@
  * cannot render is worse than useless.
  */
 
-import { CALENDAR_CRON, BREAKING_CRON, PIPELINE_CRON, SLIDESHOW_CRON } from './scheduler';
+import {
+  CALENDAR_CRON,
+  BREAKING_CRON,
+  PIPELINE_CRON,
+  SECURITY_CRON,
+  SLIDESHOW_CRON,
+} from './scheduler';
 import { getLastCronRun } from './cronRuns';
 import { getLastJobRuns, type JobRunRecord, type JobStatus } from './lib/jobs';
 import { getLlmUsage, remainingLlmBudget, resolveDailyBudget } from './llm/budget';
@@ -39,6 +45,7 @@ const JOBS: JobLine[] = [
   { key: 'breaking', label: 'اخبار فوری', cron: BREAKING_CRON, schedule: 'هر ۵ دقیقه' },
   { key: 'calendar', label: 'تقویم اقتصادی', cron: CALENDAR_CRON, schedule: 'روزانه ۰۸:۰۰' },
   { key: 'slideshow', label: 'اسلایدشو', cron: SLIDESHOW_CRON, schedule: 'هر ۳ ساعت' },
+  { key: 'security', label: 'دایجست امنیتی', cron: SECURITY_CRON, schedule: 'روزانه ۲۰:۰۰' },
 ];
 
 /** `۳ دقیقه پیش` — relative age, which is what an operator actually reads. */
@@ -185,7 +192,8 @@ export async function buildJobStatusReport(env: Env, opts: StatusOptions = {}): 
     `   ${PIPELINE_CRON} — خلاصهٔ خبری`,
     `   ${BREAKING_CRON} — اخبار فوری`,
     `   ${CALENDAR_CRON} — تقویم اقتصادی`,
-    `   ${SLIDESHOW_CRON} — اسلایدشو`
+    `   ${SLIDESHOW_CRON} — اسلایدشو`,
+    `   ${SECURITY_CRON} — دایجست امنیتی`
   );
 
   return lines.join('\n').slice(0, 4000);
