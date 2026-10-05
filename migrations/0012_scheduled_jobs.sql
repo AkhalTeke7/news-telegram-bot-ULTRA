@@ -83,11 +83,7 @@ CREATE TABLE IF NOT EXISTS breaking_alerts (
   category   TEXT NOT NULL DEFAULT '',
   local_date TEXT NOT NULL,
   sent_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  message_id INTEGER,
-  -- Telegram file_id of the delivered slide. Re-sending a file_id is free and
-  -- instant, so the private-chat /slideshow browser pages through an album
-  -- without re-rendering a single PNG.
-  file_id    TEXT
+  message_id INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_breaking_alerts_date ON breaking_alerts (local_date);

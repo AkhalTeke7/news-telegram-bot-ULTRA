@@ -77,16 +77,37 @@ const STOP_WORDS = new Set([
 ]);
 
 /**
- * Content fingerprint of a headline: the significant words, sorted.
+ * Very light English suffix stripping.
+ *
+ * Only the regular inflections that actually cause cross-source misses:
+ * plural `-s` ("rates"/"rate", "cuts"/"cut") and `-ed`/`-ing`
+ * ("raised"/"raising"). It is intentionally NOT a real stemmer — no
+ * irregular verbs, no dictionary. "holds" and "held" still differ, and that
+ * is an accepted limitation rather than a silent approximation.
+ */
+export function lightStem(word: string): string {
+  if (word.length > 5 && word.endsWith('ing')) return word.slice(0, -3);
+  if (word.length > 4 && word.endsWith('ed')) return word.slice(0, -2);
+  if (word.length > 3 && word.endsWith('s') && !word.endsWith('ss')) return word.slice(0, -1);
+  return word;
+}
+
+/**
+ * Content fingerprint of a headline: the significant words, stemmed, sorted.
  *
  * Sorting makes the key insensitive to how different outlets order the same
- * facts ("Fed raises rates" vs "Rates raised by Fed"), which is what lets
- * cross-source confirmation actually match.
+ * facts, which is what lets cross-source confirmation actually match. Real
+ * example from 2026-10-05, both of which produce the SAME key:
+ *
+ *   BBC  "G7 to release millions of barrels of oil after OPEC output cut"
+ *   CNBC "OPEC output cut prompts G7 oil release of millions of barrels"
  */
 export function storyFingerprint(title: string, keep = 6): string {
   const words = normalizeTitle(title)
     .split(' ')
-    .filter((w) => w.length >= 3 && !STOP_WORDS.has(w));
+    .filter((w) => w.length >= 3 && !STOP_WORDS.has(w))
+    .map(lightStem)
+    .filter((w) => w.length >= 3);
   const significant = [...new Set(words)].sort().slice(0, keep);
   if (significant.length === 0) return fnv1a(normalizeTitle(title));
   return fnv1a(significant.join(' '));
