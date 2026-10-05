@@ -11,6 +11,7 @@
     "build": "wrangler deploy --dry-run --outdir dist",
     "build:fonts": "node scripts/build-fonts.mjs",
     "preview:slide": "node scripts/preview-slide.mjs",
+    "preview:calendar": "node scripts/preview-calendar.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "db:migrate:local": "wrangler d1 migrations apply news-bot --local",

@@ -150,6 +150,11 @@ export interface SendMessageOptions extends TelegramClientOptions {
   parseMode?: TelegramParseMode;
   disableNotification?: boolean;
   replyMarkup?: InlineKeyboardMarkup;
+  /**
+   * Suppresses the large link card Telegram renders for the first URL.
+   * Alerts carry a source link but should not be dominated by its preview.
+   */
+  disableLinkPreview?: boolean;
   /** Bounded so one slow Telegram call cannot consume the invocation budget. */
   timeoutMs?: number;
 }
@@ -235,6 +240,8 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SentMessage
   if (opts.parseMode) payload.parse_mode = opts.parseMode;
   if (opts.disableNotification) payload.disable_notification = 'true';
   if (opts.replyMarkup) payload.reply_markup = JSON.stringify(opts.replyMarkup);
+  // link_preview_options supersedes the deprecated disable_web_page_preview.
+  if (opts.disableLinkPreview) payload.link_preview_options = JSON.stringify({ is_disabled: true });
 
   let res: Response;
   try {
