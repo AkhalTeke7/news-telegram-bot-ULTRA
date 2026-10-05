@@ -19,7 +19,7 @@ want to know *why* HackerOne, Bugcrowd and YesWeHack are absent.
 | --- | --- |
 | Cron | `30 16 * * *` UTC = **20:00 Asia/Tehran**, daily |
 | Destination | 🎯 HUNT console setting, else the `TELEGRAM_SECURITY_CHANNEL` secret — **neither ⇒ job publishes nothing** |
-| Operator UI | **🎯 HUNT** button in the admin panel header → `#hunt` (see below) |
+| Operator UI | **🎯 HUNT** button in the admin panel header → `/hunt` (see below) |
 | Language | English only, verbatim from the source |
 | LLM calls | **1 per day**, and the digest still publishes without it |
 | Feeds | 6 |
@@ -382,7 +382,18 @@ HUNT console setting (ai_settings: security_channel)   ← wins
 
 `MAIN` in either place means "post it to the main news channel".
 
-Tests: `test/hunt.test.ts` (25) covers channel validation and precedence,
+### Reaching it
+
+`/hunt` is served by the Worker as the same document as `/`; the page reads
+`location.pathname` on boot and opens the console view, and the buttons use
+`history.pushState` so switching never reloads. That means the console has a
+real address (bookmarkable, reloadable, shareable) without being a second app
+with a second login. The original `#hunt` anchor keeps working.
+
+Tests: `test/hunt.test.ts` (27) covers channel validation and precedence,
 masking, the overview, the live probe (including a feed that answers 200 with
 an HTML login page), all three run modes, the four endpoints' auth and
-validation, and that the panel actually ships the button and the view.
+validation, and that the panel actually ships the button, the view and the
+`/hunt` route. `npm run check:ui` additionally executes the page's real script
+against a small DOM and clicks through every flow, which is the only way to
+catch a template-literal escaping mistake that breaks the whole script.

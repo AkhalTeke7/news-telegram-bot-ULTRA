@@ -197,6 +197,13 @@ export const APP_HTML = `<!DOCTYPE html>
         <button id="testMessageBtn">🧪 ارسال پیام آزمایشی</button>
         <button id="testImageBtn">🖼 ارسال تصویر آزمایشی</button>
       </div>
+      <div class="mode-row tile" id="huntRow" style="margin-top:14px">
+        <div style="min-width:220px;flex:1">
+          <div class="mode-title"><span class="dot"></span>کنسول اخبار هک و باگ‌بانتی (HUNT)</div>
+          <div class="sub">دایجست انگلیسی رایتاپ‌های امنیتی که هر شب ساعت ۲۰ منتشر می‌شود: تنظیم کانال مقصد، بررسی زندهٔ منابع، پیش‌نمایش و ارسال دستی.</div>
+        </div>
+        <button id="huntOpenBtn" class="primary">🎯 باز کردن کنسول HUNT</button>
+      </div>
       <div id="toolsMsg" class="msg"></div>
       <pre id="toolsLog" class="log hidden" dir="rtl"></pre>
     </section>
@@ -300,11 +307,28 @@ function showApp() { $('loginView').classList.add('hidden'); $('huntView').class
 // The HUNT console is a second view of the SAME authenticated page, not a
 // second app: no extra login, no page load, and '#hunt' makes it linkable.
 function showHunt() { $('loginView').classList.add('hidden'); $('appView').classList.add('hidden'); $('huntView').classList.remove('hidden'); loadHunt(); }
+// '/hunt' is the real address of the console; '#hunt' is kept working because
+// it was the first thing that shipped and may already be bookmarked.
+function wantsHunt() {
+  // Deliberately escape-free: this file is a TS template literal, where a
+  // stray backslash inside a regex silently becomes something else.
+  var path = location.pathname;
+  if (path.length > 1 && path.charAt(path.length - 1) === '/') path = path.slice(0, -1);
+  return path === '/hunt' || location.hash === '#hunt';
+}
 function applyRoute() {
   if (!$('loginView').classList.contains('hidden')) return; // not signed in yet
-  if (location.hash === '#hunt') showHunt(); else showApp();
+  if (wantsHunt()) showHunt(); else showApp();
+}
+// Navigate without reloading the document, but leave a real URL behind, so the
+// browser back button and a straight reload both land where the user expects.
+function goTo(path) {
+  try { history.pushState({}, '', path); }
+  catch { location.href = path; return; }
+  applyRoute();
 }
 window.addEventListener('hashchange', applyRoute);
+window.addEventListener('popstate', applyRoute);
 
 function tile(k, v, cls) {
   const t = mk('div', 'tile' + (cls ? ' ' + cls : ''));
@@ -864,8 +888,9 @@ async function runHunt(mode, btn) {
   for (const b of buttons) b.disabled = false;
 }
 
-$('huntBtn').onclick = () => { location.hash = '#hunt'; applyRoute(); };
-$('huntBackBtn').onclick = () => { location.hash = ''; applyRoute(); };
+$('huntBtn').onclick = () => goTo('/hunt');
+$('huntOpenBtn').onclick = () => goTo('/hunt');
+$('huntBackBtn').onclick = () => goTo('/');
 $('huntRefreshBtn').onclick = async () => { const b = $('huntRefreshBtn'); b.disabled = true; await loadHunt(); b.disabled = false; };
 
 $('huntSaveChannelBtn').onclick = async () => {

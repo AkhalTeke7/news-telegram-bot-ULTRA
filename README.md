@@ -323,9 +323,12 @@ configured — is a *silent skip*. Nothing appeared in the channel, nothing appe
 panel, and the only way to tell the difference between "misconfigured", "feeds dead" and
 "nothing newsworthy today" was `wrangler tail` at the right minute.
 
-The admin panel now has a **🎯 HUNT** button in its header. It switches the same
-authenticated page to a second view (`#hunt`, LTR and English, because the digest is) —
-no second login, no separate deployment. It gives you:
+The admin panel now has a **🎯 HUNT** button in its header (and a second one in
+«ابزارها و آزمون», so it is hard to miss). It switches the same authenticated page to a
+second view — LTR and English, because the digest is — and leaves a real URL behind:
+**`/hunt`** can be reloaded, bookmarked or shared, and opens straight into the console
+(the older `#hunt` anchor still works). No second login, no separate deployment. It gives
+you:
 
 * **Status** — is a channel configured and where from (panel or secret, always masked),
   is the bot token present, the cron, the last run and its detail, today's claim, how many
@@ -348,6 +351,13 @@ no second login, no separate deployment. It gives you:
 
 Everything there is behind the same admin session as the rest of `/api`, and the four
 endpoints are listed in [Admin API](#admin-api).
+
+The panel's own JavaScript lives inside a TypeScript template literal, where one bad
+escape ships a page whose script throws — which looks exactly like a button that does
+nothing, and which the Worker test suite cannot catch (it runs in workerd, where `eval`
+is forbidden). `npm run check:ui` therefore drives the real page script against a small
+DOM and *clicks* the buttons: boot with and without a session, open the console from both
+entry points, load `/hunt` directly, probe the feeds, preview a digest, and go back.
 
 ## Telegram administration
 
@@ -549,6 +559,7 @@ another CI pipeline, make sure the build command installs dependencies
 
 | Method | Path | Notes |
 |---|---|---|
+| GET | `/` · `/hunt` | the admin panel; `/hunt` opens the 🎯 HUNT console view of the same page |
 | GET | `/api/health` | public liveness |
 | POST | `/api/telegram/webhook` | Telegram updates; requires `X-Telegram-Bot-Api-Secret-Token` |
 | POST | `/api/auth/login` | `{password}` → signed HttpOnly cookie |

@@ -561,11 +561,12 @@ describe('the HUNT view inside the admin panel', () => {
 
     expect(res.status).toBe(200);
     expect(html).toContain('id="huntBtn"');
+    expect(html).toContain('id="huntOpenBtn"');
     expect(html).toContain('id="huntView"');
     expect(html).toContain('id="huntBackBtn"');
-    // Reachable by URL, and switched client-side — no second login.
-    expect(html).toContain("location.hash = '#hunt'");
-    expect(html).toContain("hashchange");
+    // Switched client-side (no second login) but with a real URL behind it.
+    expect(html).toContain("goTo('/hunt')");
+    expect(html).toContain('popstate');
     for (const id of ['huntStatus', 'huntFeeds', 'huntPreview', 'huntChannel', 'huntRecent']) {
       expect(html).toContain(`id="${id}"`);
     }
@@ -577,5 +578,22 @@ describe('the HUNT view inside the admin panel', () => {
     ]) {
       expect(html).toContain(path);
     }
+  });
+
+  it('serves the same page at /hunt, so the URL can be reloaded or shared', async () => {
+    const root = await call('/');
+    const hunt = await call('/hunt');
+    const slash = await call('/hunt/');
+
+    expect(hunt.status).toBe(200);
+    expect(slash.status).toBe(200);
+    expect(hunt.headers.get('content-type')).toContain('text/html');
+    // Literally the same document: one app, two views.
+    expect(await hunt.text()).toBe(await root.text());
+  });
+
+  it('does not expose the console to a POST or an unknown path', async () => {
+    expect((await call('/hunt', { method: 'POST', body: '{}' })).status).toBe(404);
+    expect((await call('/hunting')).status).toBe(404);
   });
 });
