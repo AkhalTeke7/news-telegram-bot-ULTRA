@@ -2,9 +2,10 @@
  * Minimal Bale Business Bot API transport. Tokens are never logged.
  *
  * Used by the publisher as a best-effort MIRROR of the Telegram output: the
- * run image and every text digest are also sent to the Bale destination when
- * BALE_BOT_TOKEN and BALE_DESTINATION_CHANNEL are configured. A Bale failure
- * never affects Telegram delivery or publish state.
+ * run's pictures are also sent to the Bale destination — as separate photo
+ * messages, since Bale has no album transport — when BALE_BOT_TOKEN and
+ * BALE_DESTINATION_CHANNEL are configured. A Bale failure never affects
+ * Telegram delivery or publish state.
  */
 
 /**

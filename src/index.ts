@@ -45,7 +45,7 @@ export default {
         { id: 103, channelUsername: 'IRIB News', text: 'پیش‌بینی کاهش دما در استان‌های شمالی کشور' },
       ];
       const frame = buildSlideFrame(sample, new Date(), 1, 3, sampleTicker);
-      return new Response(buildImageHtml(frame, 'four'), { headers: HTML_HEADERS });
+      return new Response(buildImageHtml(frame, 'fixed'), { headers: HTML_HEADERS });
     }
 
     if (url.pathname === '/favicon.ico') {

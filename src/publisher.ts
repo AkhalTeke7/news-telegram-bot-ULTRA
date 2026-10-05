@@ -1,162 +1,51 @@
 /**
  * Phase 4: publishes summarized news to the configured Telegram destination.
  *
+ * The run is published as PICTURES ONLY. No text digest is ever sent: the top
+ * news of the run are rendered onto slides (two news items per picture) and
+ * delivered as one Telegram album, which the client shows as a single
+ * swipeable slideshow. The only text that leaves this module is the album's
+ * one-line date caption.
+ *
  * Guarantees:
  *  - only messages with a real summary, a valid source link and an enabled
- *    source channel are published
- *  - a message is marked published only after Telegram confirms delivery, using
- *    an atomic guarded UPDATE so a repeat run cannot double-publish
- *  - news digests use Telegram's Rich Messages API with RTL HTML; every
- *    AI/source value is escaped before it is inserted, so untrusted content can
- *    never break the markup
- *  - rate limits stop the pass instead of hammering; leftovers retry next hour
+ *    source channel can reach a slide
+ *  - a message is marked published only after Telegram confirms the album,
+ *    using an atomic guarded UPDATE so a repeat run cannot double-publish
+ *  - news the album could not carry stays unpublished and is picked up by the
+ *    next run, in importance order — nothing is silently dropped
+ *  - rate limits stop the pass instead of hammering; leftovers retry next run
  */
 
-import { block, doc, type InputRichMessage } from 'tg-rich-messages';
-import { listChannels } from './channels';
-import { baleSendMessage, baleSendPhoto } from './bale';
+import { baleSendPhoto } from './bale';
 import {
   buildAlbumCaption,
-  buildAlbumCaptions,
   MAX_ALBUM_SLIDES,
-  MAX_IMAGE_ITEMS,
   renderRunAlbum,
   type BrowserBinding,
   type RenderedSlideImage,
 } from './newsImage';
 import {
   isValidDestinationChat,
-  sendMessage,
-  sendRichMessage,
   sendMediaGroup,
   sendPhoto,
   TelegramError,
   TelegramRateLimitError,
   type DestinationChat,
+  type SentMessage,
 } from './telegram';
 import type { Env } from './types';
-import { topicPresentation } from './topic';
 
 /**
- * Telegram/API safety bound — NOT a product limit.
+ * Browser Run cost of one run, as a sanity bound rather than a product limit.
  *
- * Workers Free allows 50 subrequests per invocation (see Cloudflare "Limits"), and
- * one hourly invocation spends some of them before publishing even starts:
- * one fetch per enabled source channel for collection, up to
- * `MAX_MESSAGES_PER_RUN` (20) for summarization, and occasionally one for the
- * model list. This module therefore spends whatever is left, rather than a flat
- * number that could push the invocation past the platform limit and get it
- * terminated mid-publish.
+ * Workers Free allows 50 subrequests per invocation and the earlier stages
+ * (collection, summarization, the occasional model list) already spend some.
+ * Image-only publishing spends at most `MAX_ALBUM_SLIDES` renders plus ONE
+ * send, which is why the album is capped at six slides / twelve news items.
  */
-export const SUBREQUEST_LIMIT_FREE = 50;
-/** Matches the summarizer's own per-run message cap. */
-export const SUMMARIZE_RESERVE = 20;
-export const MODEL_LIST_RESERVE = 1;
-/**
- * The run album's subrequest cost: one Browser Run render per slide plus one
- * `sendMediaGroup` (or `sendPhoto` for a single slide). This constant is the
- * DEFAULT (one slide + send) used when no better estimate exists; the pipeline
- * computes the real slide count from the pending news and passes
- * `slides + 1` explicitly. Reserving them keeps the whole invocation inside
- * the platform limit instead of overrunning it at the end of the run. The
- * best-effort Bale mirror is additional but deliberately not counted.
- */
-export const IMAGE_RESERVE = 2;
-/** Absolute ceiling, never exceeded regardless of the budget. */
-export const MAX_MESSAGES_PER_RUN = 40;
+export const MAX_ALBUM_SUBREQUESTS = MAX_ALBUM_SLIDES + 1;
 
-/**
- * Messages this run may send: the platform budget minus what the earlier stages
- * and the run album need, clamped to [1, MAX_MESSAGES_PER_RUN]. Deterministic
- * for a given enabled-channel count and album size. Anything left over is
- * recorded with the explicit `run_limit` category and stays unpublished, so the
- * next run continues with it in the same configured order — nothing is silently
- * dropped.
- */
-export function publishMessageBudget(
-  enabledChannelCount: number,
-  imageReserve: number = IMAGE_RESERVE
-): number {
-  const available =
-    SUBREQUEST_LIMIT_FREE -
-    enabledChannelCount -
-    SUMMARIZE_RESERVE -
-    MODEL_LIST_RESERVE -
-    Math.max(0, imageReserve);
-  return Math.min(MAX_MESSAGES_PER_RUN, Math.max(1, available));
-}
-
-const TELEGRAM_TEXT_LIMIT = 4096;
-/** Kept below Telegram's limit so HTML tags and topic details always fit. */
-const MAX_SUMMARY_CHARS = 1050;
-/** AI headlines are short by contract; this only guards the 4096 limit. */
-const MAX_TITLE_CHARS = 180;
-const MAX_HIGHLIGHT_CHARS = 120;
-const MAX_HIGHLIGHTS = 3;
-
-/** Telegram HTML escaping for AI and RSS text. */
-export function escapeTelegramHtml(value: string): string {
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-/**
- * Wraps our already-escaped digest HTML in the supplied Rich Messages builder.
- * The raw block is intentional here: this HTML is generated by this module,
- * and all dynamic values were escaped before this point. It lets the library
- * validate the document and add the RTL/skip-entity-detection metadata without
- * double-escaping Telegram tags.
- */
-export function toTelegramRichMessage(html: string): InputRichMessage {
-  return doc(block(() => html)).validate().toInputRichMessage({
-    isRtl: true,
-    skipEntityDetection: true,
-  });
-}
-
-/**
- * Prefer Rich Messages, but keep deployments on an older Bot API functional.
- * A method/route rejection is safe to retry through ordinary HTML `sendMessage`;
- * network, rate-limit, authentication, and content errors are not retried here.
- */
-async function sendDigestMessage(opts: {
-  token: string;
-  chatId: DestinationChat;
-  html: string;
-  fetchImpl?: typeof fetch;
-  baseUrl?: string;
-}) {
-  try {
-    return await sendRichMessage({
-      token: opts.token,
-      chatId: opts.chatId,
-      richMessage: toTelegramRichMessage(opts.html),
-      fetchImpl: opts.fetchImpl,
-      baseUrl: opts.baseUrl,
-    });
-  } catch (error) {
-    const unsupported =
-      error instanceof TelegramError &&
-      (error.status === 404 ||
-        error.status === 405 ||
-        (error.status === 400 && /method|rich.?message|unknown|not found/i.test(error.description)));
-    if (!unsupported) throw error;
-
-    return sendMessage({
-      token: opts.token,
-      chatId: opts.chatId,
-      text: opts.html,
-      parseMode: 'HTML',
-      fetchImpl: opts.fetchImpl,
-      baseUrl: opts.baseUrl,
-    });
-  }
-}
-
-/** Only original public-channel post links are ever published. */
 const SOURCE_URL_RE = /^https:\/\/t\.me\/[A-Za-z][A-Za-z0-9_]{4,31}\/\d{1,20}$/;
 
 /** Source kind of a channel row, mirroring `channels.source_type`. */
@@ -213,8 +102,7 @@ export type PublishErrorCategory =
   | 'invalid_source_url'
   | 'rate_limited'
   | 'telegram_error'
-  | 'network'
-  | 'run_limit';
+  | 'network';
 
 export interface PublishFailure {
   messageId: number;
@@ -232,6 +120,11 @@ export interface PublishReport {
   image?: ImagePublishOutcome;
   /** Bale mirror counters; absent when Bale delivery is not configured. */
   bale?: { sent: number; failed: number };
+  /**
+   * Rows retired this run because the AI ranked them as not newsworthy. They
+   * are not failures: nothing went wrong, they simply never enter a picture.
+   */
+  retired: number;
 }
 
 export interface PublishOptions {
@@ -240,8 +133,8 @@ export interface PublishOptions {
   fetchImpl?: typeof fetch;
   baseUrl?: string;
   /**
-   * Browser Run binding. When absent, the run album is skipped entirely and the
-   * per-channel text digests behave exactly as before.
+   * Browser Run binding. When absent nothing is published at all — the album
+   * is the only output, so the run keeps every item pending for next time.
    */
   browser?: BrowserBinding;
   now?: Date;
@@ -255,9 +148,9 @@ export interface PublishOptions {
   sleepImpl?: (ms: number) => Promise<void>;
   /**
    * Optional Bale mirror (BALE_BOT_TOKEN + BALE_DESTINATION_CHANNEL). Every
-   * delivered Telegram message — the run album and each text digest part — is
-   * also sent to Bale. Best effort: a Bale failure is logged and counted but
-   * never affects Telegram delivery or publish state.
+   * delivered picture is also sent to Bale, as separate photo messages (Bale
+   * has no album transport). Best effort: a Bale failure is logged and counted
+   * but never affects Telegram delivery or publish state.
    */
   bale?: BaleDeliveryOptions;
 }
@@ -385,6 +278,9 @@ export async function selectPublishableMessages(db: D1Database): Promise<Publish
 }
 
 /** Parses AI key points defensively; malformed legacy data is simply omitted. */
+/** Editorial key points kept per row; only the picture template reads them. */
+const MAX_STORED_HIGHLIGHTS = 3;
+
 function parseHighlights(raw: string | null): string[] {
   if (!raw) return [];
   try {
@@ -394,54 +290,17 @@ function parseHighlights(raw: string | null): string[] {
       .filter((item): item is string => typeof item === 'string')
       .map((item) => item.trim())
       .filter(Boolean)
-      .slice(0, MAX_HIGHLIGHTS);
+      .slice(0, MAX_STORED_HIGHLIGHTS);
   } catch {
     return [];
   }
-}
-
-/** One source channel and its publishable news, oldest first. */
-export interface ChannelGroup {
-  channelId: number;
-  channelUsername: string;
-  channelTitle: string | null;
-  sourceType: SourceType;
-  items: PublishableMessage[];
-}
-
-/**
- * Groups rows by source channel, preserving the configured channel order
- * (channel id order) and chronological order inside each group.
- */
-export function groupByChannel(items: PublishableMessage[]): ChannelGroup[] {
-  const groups = new Map<number, ChannelGroup>();
-  for (const item of items) {
-    const existing = groups.get(item.channelId);
-    if (existing) existing.items.push(item);
-    else {
-      groups.set(item.channelId, {
-        channelId: item.channelId,
-        channelUsername: item.channelUsername,
-        channelTitle: item.channelTitle ?? null,
-        sourceType: item.sourceType ?? 'telegram',
-        items: [item],
-      });
-    }
-  }
-  return [...groups.values()];
-}
-
-export interface DigestPart {
-  text: string;
-  /** News rows carried by this part; marked published only after delivery. */
-  itemIds: number[];
 }
 
 /**
  * Display identifier for a channel: its username, else its configured title.
  * RSS channels prefer the configured feed title (e.g. «بی‌بی‌سی فارسی») over the
  * synthetic internal username (`rss_3`).
- * Never invents a name; an empty result makes the digest skip sending.
+ * Never invents a name; an empty result simply leaves the card footer bare.
  */
 export function channelDisplayName(item: {
   channelUsername: string;
@@ -452,145 +311,6 @@ export function channelDisplayName(item: {
   const title = (item.channelTitle ?? '').trim();
   if (item.sourceType === 'rss') return title || username;
   return username || title;
-}
-
-/**
- * Footer/label form of a source name: `@username` for real Telegram usernames,
- * the display title verbatim for everything else (RSS feed names are Persian
- * text and must not get a bogus `@`).
- */
-export function sourceLabel(name: string): string {
-  return /^[A-Za-z][A-Za-z0-9_]*$/.test(name) ? `@${name}` : name;
-}
-
-/**
- * Display form of the configured destination channel.
- *
- * Only used for the footer line that tells readers where the digest is
- * published; the actual `sendMessage` target keeps using the configured value
- * unchanged. Usernames get an `@`, numeric channel ids are printed as stored
- * (no invented handle).
- */
-export function destinationLabel(raw: string | undefined): string {
-  const value = (raw ?? '').trim();
-  if (!value) return '';
-  if (value.startsWith('@')) return value;
-  if (/^-?\d+$/.test(value)) return value;
-  return `@${value}`;
-}
-
-/**
- * Builds an HTML-formatted digest for one source channel.
- *
- * Each story deliberately contains both the AI headline and its full summary.
- * The topic emoji comes from the AI category, while every value originating in
- * D1 is escaped before it is sent with Telegram's HTML parse mode.
- *
- * Layout:
- *
- *   🏛️ <b>Headline</b>
- *   📝 <b>خلاصه:</b> The complete detail...
- *   🔎 <b>نکات مهم:</b> point one · point two
- *
- *   📡 <i>منبع: @source</i>
- *   📣 <i>@destination</i>
- */
-export function buildChannelDigest(
-  channelName: string,
-  destination: string,
-  items: {
-    id: number;
-    summaryText: string;
-    title?: string | null;
-    category?: string | null;
-    highlights?: string[];
-  }[]
-): DigestPart[] {
-  const name = channelName.trim();
-  if (!name) return [];
-
-  const separator = '\n\n';
-  const source = escapeTelegramHtml(sourceLabel(name));
-  const displayedDestination = destination.trim() ? escapeTelegramHtml(destination.trim()) : '';
-  const footer = `📡 <i>منبع: ${source}</i>${displayedDestination ? `\n📣 <i>${displayedDestination}</i>` : ''}`;
-  const overhead = separator.length + footer.length;
-  const maxBodyLength = Math.max(1, TELEGRAM_TEXT_LIMIT - overhead);
-
-  const prepared = items
-    .map((item) => {
-      const summary = sanitizeText(item.summaryText, Math.min(MAX_SUMMARY_CHARS, maxBodyLength));
-      const title = item.title
-        ? sanitizeText(item.title, MAX_TITLE_CHARS).replace(/\n+/g, ' ').trim()
-        : '';
-      const highlights = (item.highlights ?? [])
-        .map((highlight) => sanitizeText(highlight, MAX_HIGHLIGHT_CHARS).replace(/\n+/g, ' ').trim())
-        .filter(Boolean)
-        .slice(0, MAX_HIGHLIGHTS);
-      const topic = topicPresentation(item.category, `${title} ${summary}`);
-
-      const heading = title
-        ? `${topic.emoji} <b>${escapeTelegramHtml(title)}</b>`
-        : `${topic.emoji} <b>خبر ${escapeTelegramHtml(topic.label)}</b>`;
-      const detail = `📝 <b>خلاصه:</b> ${escapeTelegramHtml(summary)}`;
-      const keyPoints = highlights.length > 0
-        ? `\n🔎 <b>نکات مهم:</b> ${highlights.map(escapeTelegramHtml).join(' · ')}`
-        : '';
-      const body = `${heading}\n${detail}${keyPoints}`;
-      return { id: item.id, body, summary, title, highlights, topic };
-    })
-    .filter((item) => item.summary.length > 0 || item.title.length > 0);
-  if (prepared.length === 0) return [];
-
-  // A normal AI response is comfortably below the limit. This compact fallback
-  // also protects the Bot API limit when legacy data contains a large amount of
-  // HTML-sensitive text that expands while escaped.
-  for (const item of prepared) {
-    if (item.body.length <= maxBodyLength) continue;
-    const compactSummary = sanitizeText(item.summary, 600);
-    const compactTitle = sanitizeText(item.title, 120).replace(/\n+/g, ' ').trim();
-    const topic = item.topic;
-    const heading = compactTitle
-      ? `${topic.emoji} <b>${escapeTelegramHtml(compactTitle)}</b>`
-      : `${topic.emoji} <b>خبر ${escapeTelegramHtml(topic.label)}</b>`;
-    item.body = `${heading}\n📝 <b>خلاصه:</b> ${escapeTelegramHtml(compactSummary)}`;
-  }
-
-  // Greedy packing on the actual HTML source length. The Bot API measures the
-  // resulting message, so conservative accounting of tags keeps every part
-  // under 4096 characters even when a digest is split.
-  const chunks: { id: number; body: string }[][] = [];
-  let current: { id: number; body: string }[] = [];
-  let used = overhead;
-
-  for (const item of prepared) {
-    const addition = item.body.length + (current.length > 0 ? separator.length : 0);
-    if (current.length > 0 && used + addition > TELEGRAM_TEXT_LIMIT) {
-      chunks.push(current);
-      current = [item];
-      used = overhead + item.body.length;
-    } else {
-      current = [...current, { id: item.id, body: item.body }];
-      used += addition;
-    }
-  }
-  if (current.length > 0) chunks.push(current);
-
-  return chunks.map((chunk) => ({
-    text: `${chunk.map((item) => item.body).join(separator)}${separator}${footer}`,
-    itemIds: chunk.map((item) => item.id),
-  }));
-}
-
-/** Plain-text sanitizer used before HTML escaping. */
-function sanitizeText(text: string, limit: number): string {
-  const cleaned = String(text ?? '')
-    // Strips C0/C1 control chars except tab and newline.
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
-    .replace(/\r\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-
-  return cleaned.length > limit ? `${cleaned.slice(0, Math.max(1, limit - 1)).trimEnd()}…` : cleaned;
 }
 
 /**
@@ -645,6 +365,7 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
       failures: [],
       rateLimited: false,
       destination: null,
+      retired: 0,
     };
   }
 
@@ -658,7 +379,7 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
         timestamp: new Date().toISOString(),
       })
     );
-    return { eligible: 0, published: 0, failures: [], rateLimited: false, destination };
+    return { eligible: 0, published: 0, failures: [], rateLimited: false, destination, retired: 0 };
   }
 
   const items = await selectPublishableMessages(db);
@@ -668,6 +389,7 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
     failures: [],
     rateLimited: false,
     destination,
+    retired: 0,
   };
 
   // Best-effort Bale mirror of everything this run delivers to Telegram.
@@ -687,35 +409,21 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
     report.failures.push({ messageId: invalid.id, category: 'invalid_source_url' });
   }
 
-  // One destination message per source channel, in configured channel order.
-  // No channel is dropped: every enabled channel is represented.
-  const groups = groupByChannel(usable);
-  const enabledChannels = (await listChannels(db)).filter((c) => c.enabled).length;
+  // Rows the AI scored 1 ("not worth publishing") can never enter a slide.
+  // With no text digest to carry them they would be re-selected by every run
+  // forever, so they are retired here with an explicit, auditable reason.
+  const rejected = usable.filter((i) => i.importance === 1);
+  for (const item of rejected) {
+    if (await markNotNewsworthy(db, item.id)) report.retired++;
+  }
+  if (report.retired > 0) logPublish('retired', 'not_newsworthy', { newsCount: report.retired });
 
-  // The album's real subrequest cost, computed BEFORE anything is sent: one
-  // Browser Run render per expected slide plus one sendMediaGroup. Slides are
-  // chunked from the same eligibility filter renderRunAlbum uses (AI headline
-  // + intro present, importance ≠ 1), so the reserve matches what will really
-  // be spent. Without a Browser Run binding or eligible news it is zero.
-  const albumEligible = usable.filter(
-    (i) => i.summaryText.trim().length > 0 && i.importance !== 1
-  );
-  const expectedSlides =
-    opts.browser && albumEligible.length > 0
-      ? Math.min(MAX_ALBUM_SLIDES, Math.ceil(albumEligible.length / MAX_IMAGE_ITEMS))
-      : 0;
-  const messageBudget = publishMessageBudget(
-    enabledChannels,
-    expectedSlides > 0 ? expectedSlides + 1 : 0
-  );
-  let messagesSent = 0;
-
-  // The run album (slideshow). Generated once from the flat publishable list
-  // and sent BEFORE any text digest. Deliberately outside the per-channel loop
-  // below, so Browser Run is called at most once per slide across the run.
-  const image = await publishRunAlbum({
+  // THE run album — the only thing this module publishes. Rendered once from
+  // the flat publishable list, so Browser Run is called at most once per
+  // slide (≤ MAX_ALBUM_SLIDES) per run.
+  const album = await publishRunAlbum({
     // RSS rows swap the synthetic `rss_N` username for the feed's display
-    // title, so the album slides and captions show «بی‌بی‌سی فارسی», not @rss_3.
+    // title, so the slides show «بی‌بی‌سی فارسی», not @rss_3.
     items: usable.map((i) =>
       i.sourceType === 'rss' ? { ...i, channelUsername: channelDisplayName(i) } : i
     ),
@@ -730,122 +438,87 @@ export async function runPublishing(db: D1Database, opts: PublishOptions = {}): 
     baseUrl: opts.baseUrl,
     now: opts.now,
   });
+
   // Left absent (not null) when there was nothing to show, so "no image" is
   // distinguishable from "an image that failed".
-  if (image) report.image = image;
+  if (!album) return finish();
+  report.image = album.outcome;
 
-  for (const group of groups) {
-    const parts = buildChannelDigest(
-      channelDisplayName(group),
-      destinationLabel(destination),
-      group.items
-    );
-    if (parts.length === 0) continue;
-
-    for (const part of parts) {
-      if (messagesSent >= messageBudget) {
-        // Explicit, deterministic bound. The remainder is recorded (not silently
-        // dropped) and stays unpublished, so the next run continues in the same
-        // configured order without losing or reordering anything.
-        for (const itemId of part.itemIds) {
-          await recordPublishFailure(db, itemId, 'run_limit');
-          report.failures.push({ messageId: itemId, category: 'run_limit' });
-        }
-        logPublish('skipped', 'run_limit', group, {
-          newsCount: part.itemIds.length,
-          messagesSent,
-          messageBudget,
-        });
-        return finish();
+  if (!album.outcome.sent) {
+    // Nothing was delivered: every row stays unpublished and is retried by the
+    // next run. A rate limit additionally stops this pass.
+    const category: PublishErrorCategory =
+      album.outcome.detail === 'rate_limited'
+        ? 'rate_limited'
+        : album.outcome.detail === 'network'
+          ? 'network'
+          : 'telegram_error';
+    if (album.outcome.error === 'send_failed') {
+      for (const id of album.itemIds) {
+        await recordPublishFailure(db, id, category);
+        report.failures.push({ messageId: id, category });
       }
-
-      try {
-        const sent = await sendDigestMessage({
-          token: opts.token!,
-          chatId: destination,
-          html: part.text,
-          fetchImpl: opts.fetchImpl,
-          baseUrl: opts.baseUrl,
-        });
-        messagesSent++;
-
-        // Only the rows carried by THIS delivered message are marked.
-        let markedCount = 0;
-        for (const itemId of part.itemIds) {
-          if (await markPublished(db, itemId, sent.message_id)) markedCount++;
-        }
-        report.published += markedCount;
-        logPublish('ok', undefined, group, {
-          destinationMessageId: sent.message_id,
-          newsCount: markedCount,
-        });
-
-        // Mirror the delivered part to Bale. Only delivered parts are mirrored,
-        // so a later retry (rows still unpublished) cannot duplicate on Bale.
-        if (bale) {
-          try {
-            await baleSendMessage({
-              token: bale.token,
-              chatId: bale.destination,
-              text: part.text,
-              parseMode: 'HTML',
-              fetchImpl: opts.fetchImpl,
-            });
-            baleCounters.sent++;
-          } catch (error) {
-            baleCounters.failed++;
-            logBale('error', {
-              reason: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
-      } catch (error) {
-        const category: PublishErrorCategory =
-          error instanceof TelegramRateLimitError
-            ? 'rate_limited'
-            : error instanceof TelegramError && error.status === 0
-              ? 'network'
-              : 'telegram_error';
-
-        const retryAfter =
-          error instanceof TelegramRateLimitError ? error.retryAfterSeconds : undefined;
-        for (const itemId of part.itemIds) {
-          await recordPublishFailure(db, itemId, category);
-          report.failures.push(
-            retryAfter === undefined
-              ? { messageId: itemId, category }
-              : { messageId: itemId, category, retryAfterSeconds: retryAfter }
-          );
-        }
-
-        if (error instanceof TelegramRateLimitError) {
-          // Stop immediately: retrying in a tight loop would burn the invocation
-          // budget. Everything left stays unpublished for the next run.
-          report.rateLimited = true;
-          logPublish('rate_limited', category, group, {
-            retryAfterSeconds: error.retryAfterSeconds,
-          });
-          return finish();
-        }
-
-        logPublish('error', category, group, { newsCount: part.itemIds.length });
-      }
+      report.rateLimited = category === 'rate_limited';
     }
+    return finish();
   }
+
+  // Only the news ON the delivered slides is marked — and only now, after
+  // Telegram confirmed the album. Everything else stays pending for the next
+  // run, in importance order.
+  for (const id of album.itemIds) {
+    if (await markPublished(db, id, album.messageId ?? 0)) report.published++;
+  }
+  logPublish('ok', undefined, {
+    destinationMessageId: album.messageId,
+    newsCount: report.published,
+    slides: album.outcome.slides,
+  });
 
   return finish();
 }
 
 /**
+ * Retires a row the AI ranked as not newsworthy (importance 1).
+ *
+ * It is marked `filtered`, the same terminal state the ad filter and the
+ * summarizer use, so `selectPublishableMessages` stops returning it. Nothing
+ * is deleted: the row, its summary and the reason stay auditable in D1.
+ */
+export async function markNotNewsworthy(db: D1Database, messageId: number): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE messages
+          SET filter_status = 'filtered',
+              filter_reason = 'low_importance',
+              filtered_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE id = ?1 AND published_at IS NULL AND filter_status <> 'filtered'`
+    )
+    .bind(messageId)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+/** What the album delivered, and which rows `runPublishing` may now mark. */
+interface AlbumDelivery {
+  outcome: ImagePublishOutcome;
+  /** Message ids of the news ON the delivered slides, in display order. */
+  itemIds: number[];
+  /** First message id of the album; the rows point at it once published. */
+  messageId: number | null;
+}
+
+/**
  * Generates and sends THE run album: a slideshow of fixed-template slides,
- * every slide covering four news items (headline + introductory text),
+ * every slide covering two news items (headline + introductory text),
  * delivered by Telegram as a single `sendMediaGroup`.
  *
  * Invariants:
- *  - called exactly once from `runPublishing`, outside the channel loop, so
- *    Browser Run is spent only on the album (≤ MAX_ALBUM_SLIDES renders);
- *  - never touches publish state: a failure here leaves every text digest and
- *    every `published_at` exactly as the existing logic would have left them;
+ *  - called exactly once from `runPublishing`, so Browser Run is spent only on
+ *    the album (≤ MAX_ALBUM_SLIDES renders) and Telegram receives one send;
+ *  - never touches publish state itself — it reports what was delivered and
+ *    the caller marks those rows, so a failure leaves every `published_at`
+ *    untouched and the news returns in the next run;
  *  - every PNG is a local buffer released as soon as the send resolves.
  *
  * Returns null when there is nothing to show, in which case no Browser Run
@@ -863,7 +536,7 @@ async function publishRunAlbum(input: {
   fetchImpl?: typeof fetch;
   baseUrl?: string;
   now?: Date;
-}): Promise<ImagePublishOutcome | null> {
+}): Promise<AlbumDelivery | null> {
   const { items, destination, token, browser } = input;
   if (items.length === 0) return null;
 
@@ -882,18 +555,22 @@ async function publishRunAlbum(input: {
     const detail = error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 120) : 'unknown';
     logImage('error', { newsCount: items.length, reason: detail });
     return {
-      slides: 0,
-      selected: 0,
-      channels: 0,
-      sent: false,
-      bytes: 0,
-      width: 0,
-      height: 0,
-      browserRunMs: 0,
-      ticker: 0,
-      skipped: 0,
-      error: 'render_failed',
-      detail,
+      outcome: {
+        slides: 0,
+        selected: 0,
+        channels: 0,
+        sent: false,
+        bytes: 0,
+        width: 0,
+        height: 0,
+        browserRunMs: 0,
+        ticker: 0,
+        skipped: 0,
+        error: 'render_failed',
+        detail,
+      },
+      itemIds: [],
+      messageId: null,
     };
   }
 
@@ -905,40 +582,32 @@ async function publishRunAlbum(input: {
   if (album.slides.length === 0) {
     logImage('error', { newsCount: items.length, reason: album.error, skipped: album.skipped });
     return {
-      slides: 0,
-      selected: 0,
-      channels: 0,
-      sent: false,
-      bytes: 0,
-      width: 0,
-      height: 0,
-      browserRunMs: album.browserRunMs,
-      ticker: 0,
-      skipped: album.skipped,
-      error: 'render_failed',
-      ...(album.error ? { detail: album.error } : {}),
+      outcome: {
+        slides: 0,
+        selected: 0,
+        channels: 0,
+        sent: false,
+        bytes: 0,
+        width: 0,
+        height: 0,
+        browserRunMs: album.browserRunMs,
+        ticker: 0,
+        skipped: album.skipped,
+        error: 'render_failed',
+        ...(album.error ? { detail: album.error } : {}),
+      },
+      itemIds: [],
+      messageId: null,
     };
   }
 
-  const now = input.now ?? new Date();
-  // Bale has no album transport, so it keeps one caption per mirrored photo.
-  const captions = buildAlbumCaptions(
-    album.slides.map((slide) => slide.items),
-    album.ticker,
-    album.hidden,
-    now
-  );
-  // Telegram gets ONE caption for the whole album: more than one caption makes
-  // the clients render the photos as separate messages instead of a slideshow.
-  const albumCaption = buildAlbumCaption(
-    album.slides.map((slide) => slide.items),
-    album.ticker,
-    album.hidden,
-    now
-  );
+  // ONE short date line for the whole run — the news itself is in the picture.
+  const albumCaption = buildAlbumCaption(input.now ?? new Date());
 
-  // Mirror every slide to Bale before the Telegram send. Independent and
-  // isolated: a Bale failure never changes the Telegram outcome below.
+  // Mirror every slide to Bale before the Telegram send. Bale has no album
+  // transport, so the same PNGs go out as separate photos, the first one
+  // captioned exactly like the Telegram album. Independent and isolated: a
+  // Bale failure never changes the Telegram outcome below.
   if (input.bale) {
     for (const [index, slide] of album.slides.entries()) {
       try {
@@ -946,7 +615,7 @@ async function publishRunAlbum(input: {
           token: input.bale.token,
           chatId: input.bale.destination,
           photo: slide.png,
-          caption: captions[index],
+          ...(index === 0 ? { caption: albumCaption } : {}),
           fetchImpl: input.fetchImpl,
         });
         input.baleCounters.sent++;
@@ -973,8 +642,10 @@ async function publishRunAlbum(input: {
     skipped: album.skipped,
   };
 
+  const deliveredIds = album.slides.flatMap((slide) => slide.items.map((item) => item.id));
+
   try {
-    await sendAlbum({
+    const sent = await sendAlbum({
       token,
       destination,
       slides: album.slides,
@@ -985,7 +656,11 @@ async function publishRunAlbum(input: {
     // The PNGs are never persisted; they stay referenced only by the local
     // album variable and become unreachable when this function returns.
     logImage('ok', { ...base, newsCount: items.length });
-    return { ...base, sent: true };
+    return {
+      outcome: { ...base, sent: true },
+      itemIds: deliveredIds,
+      messageId: sent?.message_id ?? null,
+    };
   } catch (error) {
     const detail =
       error instanceof TelegramRateLimitError
@@ -997,7 +672,11 @@ async function publishRunAlbum(input: {
       newsCount: items.length,
       reason: error instanceof Error ? error.message : String(error),
     });
-    return { ...base, error: 'send_failed', detail };
+    return {
+      outcome: { ...base, error: 'send_failed', detail },
+      itemIds: deliveredIds,
+      messageId: null,
+    };
   }
 }
 
@@ -1017,9 +696,9 @@ async function sendAlbum(input: {
   caption: string;
   fetchImpl?: typeof fetch;
   baseUrl?: string;
-}): Promise<void> {
+}): Promise<SentMessage | null> {
   if (input.slides.length === 1) {
-    await sendPhoto({
+    return await sendPhoto({
       token: input.token,
       chatId: input.destination,
       photo: input.slides[0].png,
@@ -1027,9 +706,8 @@ async function sendAlbum(input: {
       fetchImpl: input.fetchImpl,
       baseUrl: input.baseUrl,
     });
-    return;
   }
-  await sendMediaGroup({
+  const messages = await sendMediaGroup({
     token: input.token,
     chatId: input.destination,
     media: input.slides.map((slide) => ({ photo: slide.png })),
@@ -1037,6 +715,7 @@ async function sendAlbum(input: {
     fetchImpl: input.fetchImpl,
     baseUrl: input.baseUrl,
   });
+  return messages[0] ?? null;
 }
 
 function logImage(status: string, extra: Record<string, unknown> = {}): void {
@@ -1064,20 +743,18 @@ function logBale(status: string, extra: Record<string, unknown> = {}): void {
   );
 }
 
+/** Run-level publish bookkeeping; the album is the only thing published. */
 function logPublish(
   status: string,
   category: string | undefined,
-  group: { channelId: number; channelUsername: string },
   extra: Record<string, unknown> = {}
 ): void {
   console.log(
     JSON.stringify({
       event: 'publish',
-      operation: 'sendMessage',
+      operation: 'album',
       status,
       category,
-      channel: group.channelUsername,
-      channelId: group.channelId,
       timestamp: new Date().toISOString(),
       ...extra,
     })

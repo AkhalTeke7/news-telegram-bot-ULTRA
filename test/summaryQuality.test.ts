@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { stripExternalIdentifiers } from '../src/adFilter';
 import { filterPendingMessages } from '../src/adFilterStage';
 import { runSummarization } from '../src/summarizer';
-import { buildChannelDigest } from '../src/publisher';
+import { buildImageHtml, buildRunFrame, selectTopNews } from '../src/newsImage';
 
 const NOW = Date.now();
 const SOURCE = 'iran_efsha_news';
@@ -170,21 +170,29 @@ describe('summarizer input hygiene', () => {
   });
 });
 
-describe('digest never carries source metadata into the body', () => {
-  it('renders summaries only, then the two footer lines', () => {
-    const parts = buildChannelDigest(SOURCE, '@destination', [
-      { id: 1, summaryText: 'امام جمعه مشهد اعلام کرد که مراسم برگزار می‌شود.' },
+describe('the picture never carries source metadata into the body', () => {
+  it('renders the summaries only, with the channel kept in the card footer', () => {
+    const items = selectTopNews([
+      {
+        id: 1,
+        summaryText: 'امام جمعه مشهد اعلام کرد که مراسم برگزار می‌شود.',
+        channelUsername: SOURCE,
+        messageDate: '2026-10-04T09:00:00Z',
+      },
       {
         id: 2,
         summaryText:
           'همزمان وزیر راه از باز شدن ۲۰ کیلومتر مسیر جدید خبر داد که درآمدزایی سالانهٔ آن ۴۰ میلیارد تومان است و به ۱۲ روستا می‌رسد.',
+        channelUsername: SOURCE,
+        messageDate: '2026-10-04T08:00:00Z',
       },
-    ]);
+    ] as never);
 
-    const text = parts[0].text;
-    expect(text).toContain('📰 <b>خبر عمومی</b>\n📝 <b>خلاصه:</b> امام جمعه مشهد اعلام کرد که مراسم برگزار می‌شود.');
-    expect(text).toContain('🏛️ <b>خبر سیاست</b>\n📝 <b>خلاصه:</b> همزمان وزیر راه از باز شدن ۲۰ کیلومتر مسیر جدید خبر داد');
-    expect(text).toContain(`📡 <i>منبع: @${SOURCE}</i>\n📣 <i>@destination</i>`);
-    expect(text).not.toMatch(/t\.me|eitaa|published a post|post titled/);
+    const html = buildImageHtml(buildRunFrame(items, new Date()));
+
+    expect(html).toContain('امام جمعه مشهد اعلام کرد که مراسم برگزار می‌شود.');
+    expect(html).toContain('همزمان وزیر راه از باز شدن ۲۰ کیلومتر مسیر جدید خبر داد');
+    expect(html).toContain(`@${SOURCE}`);
+    expect(html).not.toMatch(/t\.me|eitaa|published a post|post titled/);
   });
 });

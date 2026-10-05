@@ -328,7 +328,7 @@ describe('global ranking', () => {
     expect(ranked.find((r) => r.id === 3)?.importance).toBe(2);
   });
 
-  it('ranks globally and produces exactly four selected items', async () => {
+  it('ranks globally and fills one picture with the two best items', async () => {
     await seedModel();
     const a = await seedChannel('channel_alpha');
     const b = await seedChannel('channel_beta');
@@ -352,13 +352,12 @@ describe('global ranking', () => {
     const rows = await selectPublishableMessages(env.DB);
     const top = selectTopNews(rows);
 
-    expect(top).toHaveLength(4);
+    // A picture holds two news, so selectTopNews returns a single pair.
+    expect(top).toHaveLength(2);
     // globally highest score wins, regardless of channel and volume
     expect(top[0].id).toBe(betaId);
     expect(top[1].id).toBe(alphaIds[0]);
-    // the remaining two slots are filled from the five rows tied at importance 2,
-    // so at least some alpha rows must be left out of the image
-    expect(top.filter((t) => alphaIds.includes(t.id))).toHaveLength(3);
+    // the five rows tied at importance 2 are left for the following pictures
     expect(alphaIds.some((id) => !top.some((t) => t.id === id))).toBe(true);
   });
 
@@ -422,61 +421,62 @@ describe('ranking input hygiene', () => {
   });
 });
 
-describe('publish budget includes the image', () => {
-  it('reserves subrequests for the Browser Run render and sendPhoto', async () => {
-    const { publishMessageBudget, IMAGE_RESERVE, SUBREQUEST_LIMIT_FREE, SUMMARIZE_RESERVE, MODEL_LIST_RESERVE } =
-      await import('../src/publisher');
+describe('the album fits inside the free subrequest budget', () => {
+  it('reserves one subrequest per picture plus the album send', async () => {
+    const { MAX_ALBUM_SUBREQUESTS } = await import('../src/publisher');
+    const { MAX_ALBUM_SLIDES, MAX_ALBUM_NEWS, MAX_IMAGE_ITEMS } = await import('../src/newsImage');
 
-    for (const channels of [1, 2, 3, 5, 8]) {
-      const budget = publishMessageBudget(channels);
-      const total =
-        channels + SUMMARIZE_RESERVE + MODEL_LIST_RESERVE + IMAGE_RESERVE + budget;
-      expect(total).toBeLessThanOrEqual(SUBREQUEST_LIMIT_FREE);
-    }
+    // Six renders + one sendMediaGroup: the whole publish path costs 7 calls,
+    // no matter how many channels fed it, because there are no text digests.
+    expect(MAX_ALBUM_SUBREQUESTS).toBe(MAX_ALBUM_SLIDES + 1);
+    expect(MAX_ALBUM_SLIDES * MAX_IMAGE_ITEMS).toBe(MAX_ALBUM_NEWS);
+    expect(MAX_ALBUM_SUBREQUESTS).toBeLessThanOrEqual(10);
   });
 
-  it('reduces the budget by the image cost versus the previous formula', async () => {
-    const { publishMessageBudget, IMAGE_RESERVE } = await import('../src/publisher');
-    const channels = 5;
-    const withoutImage =
-      50 - channels - 20 - 1;
-    expect(publishMessageBudget(channels)).toBe(Math.max(1, withoutImage - IMAGE_RESERVE));
+  it('no longer exposes a per-channel message budget', async () => {
+    const publisher = await import('../src/publisher');
+    expect('publishMessageBudget' in publisher).toBe(false);
+    expect('buildChannelDigest' in publisher).toBe(false);
   });
 });
 
-describe('title and summary are shared between image and digest', () => {
-  it('uses the identical AI title and summary in both outputs', async () => {
+describe('the AI title and summary go straight onto the card', () => {
+  it('uses the identical AI title and summary on the picture', async () => {
     const a = await seedChannel('channel_alpha');
     const title = 'تیتر دقیق خبر';
     const summary = 'خلاصهٔ دقیق خبر.';
     await seedProcessed(a, 'channel_alpha', 1, title, summary, 10);
     await markImportance(env.DB, (await selectRankCandidates(env.DB))[0].id, 5);
 
-    const { selectPublishableMessages, buildChannelDigest, runPublishing } = await import(
-      '../src/publisher'
-    );
-    const { selectTopNews } = await import('../src/newsImage');
-    const { sendMessage } = await import('../src/telegram');
+    const { selectPublishableMessages, runPublishing } = await import('../src/publisher');
+    const { selectTopNews, buildRunFrame, buildImageHtml } = await import('../src/newsImage');
 
     const rows = await selectPublishableMessages(env.DB);
     const [imageItem] = selectTopNews(rows);
-    const parts = buildChannelDigest('channel_alpha', '@destination', rows);
 
     expect(imageItem.title).toBe(title);
     expect(imageItem.summary).toBe(summary);
-    expect(parts[0].text).toContain(title);
-    expect(parts[0].text).toContain(summary);
-    expect(typeof sendMessage).toBe('function');
+
+    const html = buildImageHtml(buildRunFrame([imageItem], new Date(NOW)));
+    expect(html).toContain(title);
+    expect(html).toContain(summary);
     expect(typeof runPublishing).toBe('function');
   });
 
-  it('keeps legacy rows readable with rich formatting when no title exists', async () => {
-    const { buildChannelDigest } = await import('../src/publisher');
-    const parts = buildChannelDigest('channel_alpha', '@destination', [
-      { id: 1, summaryText: 'خلاصهٔ خبر.', title: null },
-    ]);
-    expect(parts[0].text).toContain('📰 <b>خبر عمومی</b>\n📝 <b>خلاصه:</b> خلاصهٔ خبر.');
-    expect(parts[0].text).toContain('📡 <i>منبع: @channel_alpha</i>\n📣 <i>@destination</i>');
+  it('keeps legacy rows readable on the card when no title exists', async () => {
+    const { selectTopNews, buildRunFrame, buildImageHtml } = await import('../src/newsImage');
+    const items = selectTopNews([
+      {
+        id: 1,
+        summaryText: 'خلاصهٔ خبر.',
+        title: null,
+        channelUsername: 'channel_alpha',
+        messageDate: '2026-10-04T09:00:00Z',
+      },
+    ] as never);
+    const html = buildImageHtml(buildRunFrame(items, new Date(NOW)));
+    expect(html).toContain('خلاصهٔ خبر.');
+    expect(html).toContain('channel_alpha');
   });
 });
 

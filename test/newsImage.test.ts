@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { runPublishing, type PublishableMessage } from '../src/publisher';
 import {
   buildAlbumCaption,
-  buildAlbumCaptions,
   buildImageHtml,
   buildRunFrame,
   buildSourceFooter,
@@ -11,6 +10,7 @@ import {
   faDigits,
   IMAGE_HEIGHT,
   IMAGE_WIDTH,
+  MAX_CAPTION_CHARS,
   MAX_IMAGE_ITEMS,
   MAX_TICKER_ITEMS,
   renderRunAlbum,
@@ -20,6 +20,7 @@ import {
   NewsImageError,
   TICKER_MAX_CHARS,
 } from '../src/newsImage';
+import { formatTehranDateTime } from '../src/time';
 
 const NOW = Date.now();
 
@@ -305,17 +306,17 @@ describe('news selection', () => {
     expect(item.title.length).toBeGreaterThan(0);
   });
 
-  it('returns at most four items even when many are available', () => {
+  it('returns at most one picture worth of items (two) by default', () => {
     const items = Array.from({ length: 9 }, (_, i) =>
       row({ id: i + 1, summaryText: `خلاصهٔ خبر ${i + 1}.`, importance: 5 - i })
     );
     const top = selectTopNews(items);
-    expect(top).toHaveLength(4);
-    expect(top.map((t) => t.id)).toEqual([1, 2, 3, 4]);
-    expect(MAX_IMAGE_ITEMS).toBe(4);
+    expect(top).toHaveLength(2);
+    expect(top.map((t) => t.id)).toEqual([1, 2]);
+    expect(MAX_IMAGE_ITEMS).toBe(2);
   });
 
-  it('the template itself never renders more than four cards', () => {
+  it('the template itself never renders more than two cards', () => {
     const html = buildImageHtml(
       buildRunFrame(
         Array.from({ length: 7 }, (_, i) => ({
@@ -327,8 +328,8 @@ describe('news selection', () => {
         new Date(NOW)
       )
     );
-    expect(html.split('<article class="card"').length - 1).toBe(4);
-    expect(html).toContain('class="grid four"');
+    expect(html.split('<article class="card"').length - 1).toBe(2);
+    expect(html).toContain('class="grid two"');
   });
 
   it('returns nothing when there is no news', () => {
@@ -388,7 +389,7 @@ describe('image html', () => {
     expect(html).not.toMatch(/https?:\/\/t\.me\//);
   });
 
-  it('lays out 1/2/3/4 items with the intended composition', () => {
+  it('lays out 1 or 2 items with the intended composition', () => {
     const mk = (n: number) =>
       buildImageHtml(
         buildRunFrame(
@@ -403,8 +404,8 @@ describe('image html', () => {
       );
     expect(mk(1)).toContain('class="grid one"');
     expect(mk(2)).toContain('class="grid two"');
-    expect(mk(3)).toContain('class="grid three"');
-    expect(mk(4)).toContain('class="grid four"');
+    // A third card cannot exist: the board holds two stories per picture.
+    expect(mk(3).split('<article class="card"').length - 1).toBe(2);
   });
 
   it('derives a headline from the summary without inventing text', () => {
@@ -465,10 +466,10 @@ describe('renderRunImage', () => {
 });
 
 describe('runPublishing image integration', () => {
-  it('sends the ALBUM (slides of four news) before the per-channel text digests', async () => {
+  it('sends ONE album of two-news pictures and no text at all', async () => {
     const a = await seedChannel('news_a');
     const b = await seedChannel('news_b');
-    // Six items across two channels: slide 1 carries four, slide 2 the rest.
+    // Six items across two channels: three pictures of two news each.
     for (let i = 1; i <= 3; i++) {
       await seedNews(a, 'news_a', i, `خبر شمارهٔ ${i} از کانال اول.`, 30 - i);
       await seedNews(b, 'news_b', 10 + i, `خبر شمارهٔ ${10 + i} از کانال دوم.`, 30 - i);
@@ -483,30 +484,23 @@ describe('runPublishing image integration', () => {
       now: new Date(NOW),
     });
 
-    // One Browser Run render per slide, then ONE sendMediaGroup slideshow.
-    expect(h.browser.quickAction).toHaveBeenCalledTimes(2);
+    // One Browser Run render per picture, then ONE sendMediaGroup slideshow.
+    expect(h.browser.quickAction).toHaveBeenCalledTimes(3);
     expect(h.groups).toHaveLength(1);
-    expect(h.groups[0].count).toBe(2);
-    expect(h.order[0]).toBe('browser');
-    expect(h.order[1]).toBe('browser');
-    expect(h.order[2]).toBe('sendMediaGroup');
-    expect(h.texts).toHaveLength(2);
+    expect(h.groups[0].count).toBe(3);
+    expect(h.order).toEqual(['browser', 'browser', 'browser', 'sendMediaGroup']);
+    expect(h.texts).toHaveLength(0);
     expect(report.image?.sent).toBe(true);
     expect(report.image?.channels).toBe(2);
-    expect(report.image?.slides).toBe(2);
+    expect(report.image?.slides).toBe(3);
     expect(report.image?.selected).toBe(6);
   });
 
-  it('sends the album before ANY text message', async () => {
+  it('captions the album once, with the date line only', async () => {
     const a = await seedChannel('news_a');
-    const b = await seedChannel('news_b');
-    const c = await seedChannel('news_c');
-    // Five items: one full slide of four plus a partial second slide.
     await seedNews(a, 'news_a', 1, 'خبر یک.', 5);
     await seedNews(a, 'news_a', 2, 'خبر دو.', 6);
-    await seedNews(b, 'news_b', 3, 'خبر سه.', 7);
-    await seedNews(b, 'news_b', 4, 'خبر چهارم.', 8);
-    await seedNews(c, 'news_c', 5, 'خبر پنجم.', 9);
+    await seedNews(a, 'news_a', 3, 'خبر سه.', 7);
 
     const h = harness();
     await runPublishing(env.DB, {
@@ -518,17 +512,14 @@ describe('runPublishing image integration', () => {
     });
 
     expect(h.groups).toHaveLength(1);
-    expect(h.groups[0].count).toBe(2);
     // The album is ONE swipeable slideshow: a caption on the first photo only.
     expect(h.groups[0].captions.filter(Boolean)).toHaveLength(1);
     expect(h.groups[0].captions[0]).toContain('📰 اخبار لحظه‌ای');
-    const firstText = h.order.indexOf('sendMessage');
-    const album = h.order.indexOf('sendMediaGroup');
-    expect(album).toBeGreaterThanOrEqual(0);
-    expect(album).toBeLessThan(firstText);
+    expect(h.groups[0].captions[0]).not.toContain('خبر یک');
+    expect(h.texts).toHaveLength(0);
   });
 
-  it('chunks the news into slides of four regardless of channel count', async () => {
+  it('chunks the news into pictures of two regardless of channel count', async () => {
     const names = ['chan_one', 'chan_two', 'chan_three', 'chan_four', 'chan_five'];
     for (const name of names) {
       const id = await seedChannel(name);
@@ -542,18 +533,18 @@ describe('runPublishing image integration', () => {
       browser: h.browser,
       now: new Date(NOW),
     });
-    // Five items: slide 1 covers four of them, slide 2 the fifth. Every item
-    // is on a slide, so nothing is demoted to the overflow ticker.
-    expect(h.browser.quickAction).toHaveBeenCalledTimes(2);
-    expect(h.groups[0].count).toBe(2);
-    expect(report.image?.slides).toBe(2);
+    // Five items: two full pictures plus a trailing single-card picture. Every
+    // item is on a picture, so nothing is demoted to the overflow ticker.
+    expect(h.browser.quickAction).toHaveBeenCalledTimes(3);
+    expect(h.groups[0].count).toBe(3);
+    expect(report.image?.slides).toBe(3);
     expect(report.image?.selected).toBe(5);
     expect(report.image?.ticker).toBe(0);
-    expect(h.texts).toHaveLength(5);
-    // The full slide uses the FIXED 2×2 news board and carries the slide count.
-    expect(h.browserCalls[0].html).toContain('grid four');
-    expect(h.browserCalls[0].html).toContain('اسلاید ۱ از ۲');
-    expect(h.browserCalls[1].html).toContain('خبر کانال chan_five');
+    expect(h.texts).toHaveLength(0);
+    // A full picture uses the FIXED two-card board and carries the counter.
+    expect(h.browserCalls[0].html).toContain('grid two');
+    expect(h.browserCalls[0].html).toContain('اسلاید ۱ از ۳');
+    expect(h.browserCalls[2].html).toContain('خبر کانال chan_five');
   });
 
   it('generates no image when no valid news exists', async () => {
@@ -573,7 +564,7 @@ describe('runPublishing image integration', () => {
     expect(h.texts).toHaveLength(0);
   });
 
-  it('still publishes every text digest when rendering fails', async () => {
+  it('publishes nothing when rendering fails — there is no text fallback', async () => {
     const a = await seedChannel('news_a');
     await seedNews(a, 'news_a', 1, 'خبر مهم.', 5);
 
@@ -590,11 +581,12 @@ describe('runPublishing image integration', () => {
     expect(report.image?.error).toBe('render_failed');
     expect(report.image?.detail).toContain('429');
     expect(h.groups).toHaveLength(0);
-    expect(h.texts).toHaveLength(1);
-    expect(report.published).toBe(1);
+    expect(h.texts).toHaveLength(0);
+    // The news stays pending for the next run instead of going out as text.
+    expect(report.published).toBe(0);
   });
 
-  it('publishes text digests even when the album send fails', async () => {
+  it('publishes nothing when the album send fails', async () => {
     const a = await seedChannel('news_a');
     await seedNews(a, 'news_a', 1, 'خبر مهم.', 5);
 
@@ -609,11 +601,11 @@ describe('runPublishing image integration', () => {
 
     expect(report.image?.sent).toBe(false);
     expect(report.image?.error).toBe('send_failed');
-    expect(h.texts).toHaveLength(1);
-    expect(report.published).toBe(1);
+    expect(h.texts).toHaveLength(0);
+    expect(report.published).toBe(0);
   });
 
-  it('leaves existing behaviour untouched when no binding is supplied', async () => {
+  it('publishes nothing when no Browser Run binding is supplied', async () => {
     const a = await seedChannel('news_a');
     await seedNews(a, 'news_a', 1, 'خبر بدون تصویر.', 5);
     const h = harness();
@@ -624,24 +616,9 @@ describe('runPublishing image integration', () => {
     });
     expect(h.browser.quickAction).not.toHaveBeenCalled();
     expect(h.photos).toHaveLength(0);
-    expect(h.texts).toHaveLength(1);
-    expect(report.published).toBe(1);
+    expect(h.texts).toHaveLength(0);
+    expect(report.published).toBe(0);
     expect(report.image).toBeUndefined();
-  });
-
-  it('keeps the per-channel digest text unchanged', async () => {
-    const a = await seedChannel('news_a');
-    await seedNews(a, 'news_a', 1, 'خلاصهٔ خبر برای کانال اول.', 5);
-    const h = harness();
-    await runPublishing(env.DB, {
-      token: 'T',
-      destination: '@destination',
-      fetchImpl: h.fetchImpl,
-      browser: h.browser,
-      now: new Date(NOW),
-    });
-    expect(h.texts[0]).toContain('📰 <b>خبر عمومی</b>\n📝 <b>خلاصه:</b> خلاصهٔ خبر برای کانال اول.');
-    expect(h.texts[0]).toContain('📡 <i>منبع: @news_a</i>\n📣 <i>@destination</i>');
   });
 
   it('fills the first slide with the globally most important news', async () => {
@@ -687,11 +664,11 @@ describe('ticker selection', () => {
       row({ id: 6, summaryText: 'خبر شش.', importance: 1 }),
     ];
     const top = selectTopNews(items);
-    expect(top.map((t) => t.id)).toEqual([1, 2, 3, 4]);
+    expect(top.map((t) => t.id)).toEqual([1, 2]);
 
     const ticker = selectTickerNews(items, new Set(top.map((t) => t.id)));
-    // id 6 scored importance 1 and is excluded; only id 5 remains.
-    expect(ticker.items.map((t) => t.id)).toEqual([5]);
+    // id 6 scored importance 1 and is excluded; ids 3-5 remain, in order.
+    expect(ticker.items.map((t) => t.id)).toEqual([3, 4, 5]);
     expect(ticker.hidden).toBe(0);
   });
 
@@ -755,7 +732,7 @@ describe('ticker html', () => {
     expect(html).not.toContain('سایر عناوین');
   });
 
-  it('marks the overflow line and keeps the card count at the top four', () => {
+  it('marks the overflow line and keeps the card count at two', () => {
     const html = buildImageHtml(
       buildRunFrame(cards, new Date(NOW), [
         ...ticker,
@@ -789,8 +766,9 @@ describe('ticker html', () => {
     };
     const rendered = await renderRunImage({ browser, items, now: new Date(NOW) });
     expect(rendered).not.toBeNull();
-    expect(rendered!.items).toHaveLength(4);
-    expect(rendered!.tickerCount).toBe(1);
+    // One picture: two cards, and everything else rides in the ticker.
+    expect(rendered!.items).toHaveLength(2);
+    expect(rendered!.tickerCount).toBe(3);
     const html = String((browser.quickAction as ReturnType<typeof vi.fn>).mock.calls[0][1].html);
     expect(html).toContain('class="ticker"');
     expect(html).toContain('خبر پنجم برای نوار عناوین.');
@@ -800,7 +778,7 @@ describe('ticker html', () => {
 /* ---------------------------------------------------------------- albums -- */
 
 describe('renderRunAlbum', () => {
-  it('chunks the run into slides of four, most important first', async () => {
+  it('chunks the run into pictures of two, most important first', async () => {
     const browser = {
       quickAction: vi.fn(async () => new Response(fakePng(), { status: 200 })),
     };
@@ -813,10 +791,11 @@ describe('renderRunAlbum', () => {
     const album = await renderRunAlbum({ browser, items, now: new Date(NOW) });
 
     expect(album).not.toBeNull();
-    expect(album!.slides).toHaveLength(2); // 6 items -> 4 + 2
-    expect(browser.quickAction).toHaveBeenCalledTimes(2);
-    expect(album!.slides[0].items.map((i) => i.id)).toEqual([1, 2, 3, 4]);
-    expect(album!.slides[1].items.map((i) => i.id)).toEqual([5, 6]);
+    expect(album!.slides).toHaveLength(3); // 6 items -> 2 + 2 + 2
+    expect(browser.quickAction).toHaveBeenCalledTimes(3);
+    expect(album!.slides[0].items.map((i) => i.id)).toEqual([1, 2]);
+    expect(album!.slides[1].items.map((i) => i.id)).toEqual([3, 4]);
+    expect(album!.slides[2].items.map((i) => i.id)).toEqual([5, 6]);
     expect(album!.selected).toBe(6);
     // Everything fits in the slides: no overflow ticker at all.
     expect(album!.ticker).toHaveLength(0);
@@ -824,20 +803,20 @@ describe('renderRunAlbum', () => {
     expect(album!.browserRunMs).toBeGreaterThanOrEqual(0);
   });
 
-  it('caps the album at ten slides and keeps the overflow for the ticker', async () => {
+  it('caps the album at six pictures (twelve news) and tickers the overflow', async () => {
     const browser = {
       quickAction: vi.fn(async () => new Response(fakePng(), { status: 200 })),
     };
-    // 45 eligible items: 40 fill ten slides, five remain as ticker lines.
-    const items = Array.from({ length: 45 }, (_, i) =>
+    // 17 eligible items: 12 fill six pictures, five remain as ticker lines.
+    const items = Array.from({ length: 17 }, (_, i) =>
       row({ id: i + 1, importance: 3, summaryText: `خبر شمارهٔ ${i + 1} دربارهٔ بودجه.` })
     );
 
     const album = await renderRunAlbum({ browser, items, now: new Date(NOW) });
 
-    expect(album!.slides).toHaveLength(10);
-    expect(album!.selected).toBe(40);
-    expect(browser.quickAction).toHaveBeenCalledTimes(10);
+    expect(album!.slides).toHaveLength(6);
+    expect(album!.selected).toBe(12);
+    expect(browser.quickAction).toHaveBeenCalledTimes(6);
     expect(album!.ticker).toHaveLength(5);
     expect(album!.hidden).toBe(0);
   });
@@ -845,7 +824,7 @@ describe('renderRunAlbum', () => {
   it('waits between slide renders so the free-tier Quick Action limit is respected', async () => {
     const browser = { quickAction: vi.fn(async () => new Response(fakePng(), { status: 200 })) };
     const waits: number[] = [];
-    const items = Array.from({ length: 9 }, (_, i) =>
+    const items = Array.from({ length: 5 }, (_, i) =>
       row({ id: i + 1, summaryText: `خبر مهم شمارهٔ ${i + 1} دربارهٔ اقتصاد.` })
     );
 
@@ -858,7 +837,7 @@ describe('renderRunAlbum', () => {
       },
     });
 
-    // Two gaps between three slides, each of the full spacing.
+    // Two gaps between three pictures, each of the full spacing.
     expect(waits).toEqual([10_500, 10_500]);
   });
 
@@ -881,11 +860,11 @@ describe('renderRunAlbum', () => {
       sleepImpl: async () => {},
     });
 
-    // First slide: two attempts (retry); after the second 429 the remaining
-    // slides are skipped without any further Browser Run request.
+    // First picture: two attempts (retry); after the second 429 the remaining
+    // pictures are skipped without any further Browser Run request.
     expect(calls).toHaveLength(2);
     expect(album!.slides).toHaveLength(0);
-    expect(album!.skipped).toBe(2);
+    expect(album!.skipped).toBe(4);
     expect(album!.error).toContain('429');
   });
 
@@ -905,19 +884,19 @@ describe('renderRunAlbum', () => {
 
     const album = await renderRunAlbum({ browser, items, now: new Date(NOW) });
 
-    expect(album!.slides).toHaveLength(1);
-    expect(album!.slides[0].items).toHaveLength(4);
+    expect(album!.slides).toHaveLength(3);
+    expect(album!.slides[0].items).toHaveLength(2);
     expect(album!.skipped).toBe(1);
     expect(album!.error).toContain('validate');
   });
 
-  it('renders full slides with the FIXED 2×2 template and numbers every slide', async () => {
+  it('renders full pictures with the FIXED two-card board and numbers them', async () => {
     const browser = {
       quickAction: vi.fn(async (_a: string, _payload: Record<string, unknown>) =>
         new Response(fakePng(), { status: 200 })
       ),
     };
-    const items = Array.from({ length: 6 }, (_, i) =>
+    const items = Array.from({ length: 3 }, (_, i) =>
       row({ id: i + 1, summaryText: `خبر مهم شمارهٔ ${i + 1} دربارهٔ اقتصاد.` })
     );
 
@@ -925,8 +904,8 @@ describe('renderRunAlbum', () => {
 
     const firstHtml = String((browser.quickAction as ReturnType<typeof vi.fn>).mock.calls[0][1].html);
     const secondHtml = String((browser.quickAction as ReturnType<typeof vi.fn>).mock.calls[1][1].html);
-    // A full slide always uses the fixed four-slot news board.
-    expect(firstHtml).toContain('grid four');
+    // A full picture always uses the fixed two-card news board.
+    expect(firstHtml).toContain('grid two');
     expect(firstHtml).toContain('اسلاید ۱ از ۲');
     expect(secondHtml).toContain('اسلاید ۲ از ۲');
     // The partial trailing slide keeps the same template and sections.
@@ -952,123 +931,28 @@ describe('renderRunAlbum', () => {
   });
 });
 
-describe('buildAlbumCaption (the single album caption)', () => {
-  const card = (id: number, title: string, channel: string) => ({
-    id,
-    channelUsername: channel,
-    category: 'economy' as const,
-    title,
-    summary: 'خلاصهٔ خبر.',
-  });
+describe('buildAlbumCaption (the album\'s only text)', () => {
+  it('is a single date line — no headline, no source, no link', () => {
+    const caption = buildAlbumCaption(new Date('2026-10-04T10:00:00.000Z'));
 
-  it('summarises every slide in one numbered, plain-text caption', () => {
-    const caption = buildAlbumCaption(
-      [
-        [card(1, 'بودجهٔ سال آینده تصویب شد', 'news_one'), card(2, 'عرضهٔ سهام جدید', 'news_two')],
-        [card(3, 'عنوان سوم', 'news_three')],
-      ],
-      [{ id: 9, channelUsername: 'news_five', text: 'عنوان پنجم' }],
-      0,
-      new Date('2026-10-04T10:00:00.000Z')
-    );
-
-    expect(caption).toContain('📰 اخبار لحظه‌ای');
-    expect(caption).toContain(`${faDigits(1)}) `);
-    expect(caption).toContain('بودجهٔ سال آینده تصویب شد');
-    expect(caption).toContain('عرضهٔ سهام جدید');
-    expect(caption).toContain(`${faDigits(3)}) `);
-    expect(caption).toContain('عنوان سوم');
-    expect(caption).toContain('@news_three');
-    expect(caption).toContain('🔎 سایر عناوین: عنوان پنجم');
+    expect(caption.split('\n')).toHaveLength(1);
+    expect(caption.startsWith('📰 اخبار لحظه‌ای — ')).toBe(true);
+    expect(caption.endsWith(' تهران')).toBe(true);
+    expect(caption).not.toContain('منبع');
+    expect(caption).not.toContain('http');
     expect(caption).not.toContain('<');
-    expect(caption.length).toBeLessThanOrEqual(1000);
+    expect(caption.length).toBeLessThanOrEqual(MAX_CAPTION_CHARS);
   });
 
-  it('reports the hidden items when there is no ticker', () => {
-    const caption = buildAlbumCaption([[card(1, 'عنوان یک', 'ch')]], [], 7, new Date(NOW));
-    expect(caption).toContain(`و ${faDigits(7)} خبر دیگر`);
+  it('carries the Tehran date and time of the run', () => {
+    const caption = buildAlbumCaption(new Date(NOW));
+    const stamp = formatTehranDateTime(new Date(NOW));
+    expect(stamp).toBeTruthy();
+    expect(caption).toContain(stamp!);
   });
 
-  it('folds whatever does not fit into the trailing count, never overflowing', () => {
-    const slides = Array.from({ length: 10 }, (_, slide) =>
-      Array.from({ length: 4 }, (_, i) =>
-        card(slide * 4 + i + 1, `${'عنوان بسیار طولانی '.repeat(6)}${slide}-${i}`, `chan_${slide}`)
-      )
-    );
-    const caption = buildAlbumCaption(slides, [], 3, new Date(NOW));
-
-    expect(caption.length).toBeLessThanOrEqual(1000);
-    expect(caption.split('\n')[0]).toContain('📰 اخبار لحظه‌ای');
-    // Dropped headlines are counted, not silently lost, and the caption still
-    // ends on a whole line rather than a mid-word cut.
-    expect(caption).toMatch(/🔎 و [۰-۹]+ خبر دیگر$/);
-  });
-});
-
-describe('buildAlbumCaptions', () => {
-  const card = (id: number, title: string, channel: string) => ({
-    id,
-    channelUsername: channel,
-    category: 'economy' as const,
-    title,
-    summary: 'خلاصهٔ خبر.',
-  });
-
-  it('puts the run header on the first slide and the overflow on the last', () => {
-    const now = new Date('2026-10-04T10:00:00.000Z');
-    const captions = buildAlbumCaptions(
-      [
-        [card(1, 'بودجهٔ سال آینده تصویب شد', 'news_one'), card(2, 'عرضهٔ سهام جدید', 'news_two')],
-        [card(3, 'عنوان سوم', 'news_three'), card(4, 'عنوان چهارم', 'news_four')],
-      ],
-      [{ id: 5, channelUsername: 'news_five', text: 'عنوان پنجم' }],
-      0,
-      now
-    );
-
-    expect(captions).toHaveLength(2);
-    // Slide 1: run header, then one headline + source pair per news item.
-    expect(captions[0]).toContain('📰 اخبار لحظه‌ای');
-    expect(captions[0]).toContain('بودجهٔ سال آینده تصویب شد');
-    expect(captions[0]).toContain('منبع: @news_one');
-    expect(captions[0]).toContain('منبع: @news_two');
-    expect(captions[0]).not.toContain('سایر عناوین');
-    // Slide 2 (last): its own items plus the overflow headlines.
-    expect(captions[1]).not.toContain('اخبار لحظه‌ای');
-    expect(captions[1]).toContain('منبع: @news_three');
-    expect(captions[1]).toContain('🔎 سایر عناوین: عنوان پنجم');
-  });
-
-  it('folds the hidden overflow count into the last caption once', () => {
-    const captions = buildAlbumCaptions([[card(1, 'عنوان یک', 'ch')]], [], 7, new Date(NOW));
-    expect(captions[0]).toContain(`و ${faDigits(7)} خبر دیگر`);
-    expect(captions[0].match(/و ۷ خبر دیگر/g)).toHaveLength(1);
-  });
-
-  it('keeps captions plain, brief and under the Telegram limit', () => {
-    const longTitle = 'عنوان'.repeat(80);
-    const captions = buildAlbumCaptions(
-      [
-        [
-          card(1, longTitle, 'news_one'),
-          card(2, 'عنوان دو', 'news_two'),
-          card(3, 'عنوان سه', 'news_three'),
-          card(4, 'عنوان چهار', 'news_four'),
-        ],
-      ],
-      Array.from({ length: 8 }, (_, i) => ({
-        id: 10 + i,
-        channelUsername: 'ch',
-        text: 'طولانی'.repeat(20),
-      })),
-      0,
-      new Date(NOW)
-    );
-    for (const caption of captions) {
-      expect(caption.length).toBeLessThanOrEqual(1000);
-      expect(caption).not.toContain('<');
-    }
-    // Four headlines with their sources all survive on the one slide.
-    expect(captions[0]).toContain('منبع: @news_four');
+  it('stays the same for the same instant, so a retry cannot drift', () => {
+    const at = new Date('2026-03-21T06:30:00.000Z');
+    expect(buildAlbumCaption(at)).toBe(buildAlbumCaption(at));
   });
 });

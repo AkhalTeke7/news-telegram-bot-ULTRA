@@ -310,9 +310,9 @@ export function createApi(): Hono<Bindings> {
     }
   });
 
-  // Renders the REAL pending news into the run image and sends ONLY that image
-  // to the configured destination — a diagnostic for the Browser Run → sendPhoto
-  // path. Nothing is marked published and no text digests are sent.
+  // Renders the REAL pending news into the run album and sends ONLY those
+  // pictures to the configured destination — a diagnostic for the
+  // Browser Run → sendMediaGroup path. Nothing is marked published.
   // Authenticated by the admin session; the response never contains the
   // destination value or the token.
   app.post('/api/telegram/test-image', async (c) => {

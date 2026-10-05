@@ -23,7 +23,6 @@ import { readMsEnv } from './pipeline';
 import {
   DEFAULT_IMAGE_RENDER_SPACING_MS,
   buildAlbumCaption,
-  buildAlbumCaptions,
   renderRunAlbum,
   type BrowserBinding,
 } from './newsImage';
@@ -176,22 +175,10 @@ export async function sendTestImage(
     };
   }
 
-  const now = opts.now ?? new Date();
-  // One caption per photo for the Bale mirror (it sends photos one by one)…
-  const captions = buildAlbumCaptions(
-    album.slides.map((slide) => slide.items),
-    album.ticker,
-    album.hidden,
-    now
-  );
-  // …and a single caption for the Telegram album, so the client shows one
-  // swipeable slideshow rather than one captioned message per photo.
-  const albumCaption = buildAlbumCaption(
-    album.slides.map((slide) => slide.items),
-    album.ticker,
-    album.hidden,
-    now
-  );
+  // ONE short date caption for the whole album: the news lives in the picture,
+  // and a second caption would make Telegram split the slideshow into separate
+  // messages.
+  const albumCaption = buildAlbumCaption(opts.now ?? new Date());
   const bytes = album.slides.reduce((sum, slide) => sum + slide.bytes, 0);
 
   try {
@@ -227,7 +214,7 @@ export async function sendTestImage(
     });
     // Best-effort Bale mirror of the very same PNGs, so this button also
     // verifies the Bale token + destination. Never affects the Telegram result.
-    const bale = await mirrorTestImageToBale(env, album.slides, captions, opts.fetchImpl);
+    const bale = await mirrorTestImageToBale(env, album.slides, albumCaption, opts.fetchImpl);
     return {
       ok: true,
       messageId: sent.message_id,
@@ -252,11 +239,16 @@ export async function sendTestImage(
   }
 }
 
-/** Mirrors every test slide to Bale; undefined when Bale is not configured. */
+/**
+ * Mirrors every test slide to Bale; undefined when Bale is not configured.
+ *
+ * Bale has no album transport, so the slides go out as separate photos — the
+ * first one carrying the same single caption the Telegram album uses.
+ */
 async function mirrorTestImageToBale(
   env: Env,
   cards: { png: ArrayBuffer }[],
-  captions: string[],
+  caption: string,
   fetchImpl?: typeof fetch
 ): Promise<BaleTestOutcome | undefined> {
   const bale = resolveBaleDelivery(env);
@@ -267,7 +259,7 @@ async function mirrorTestImageToBale(
         token: bale.token,
         chatId: bale.destination,
         photo: card.png,
-        caption: captions[index],
+        ...(index === 0 ? { caption } : {}),
         fetchImpl,
       });
     }
