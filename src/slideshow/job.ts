@@ -2,12 +2,14 @@
  * TASK 1 — the news slideshow.
  *
  * Pipeline for one run:
- *   1. pick at most N (default 10) summarized items not sent as a slide before
+ *   1. pick at most N (default 12) summarized items not sent as a slide before
  *   2. translate the non-Persian ones to Persian      (1 batched LLM call)
  *   3. extract 2-4 verbatim keywords per item          (1 batched LLM call)
  *   4. resolve each article's og:image                 (1 bounded fetch each)
- *   5. render one 1080x1350 PNG per item via Browser Run
- *   6. deliver as ONE Telegram album (sendMediaGroup, 2-10 photos)
+ *   5. render one 1080x1350 PNG per PAIR of items via Browser Run, so twelve
+ *      news items fit in six photos — inside Telegram's ten-photo album limit
+ *   6. deliver as ONE Telegram album (sendMediaGroup), pictures only: the
+ *      single caption is a date line, every headline lives in the picture
  *   7. ONLY after Telegram confirms, mark the items as sent in D1
  *
  * Step 7 is the important one. Marking before the send would mean a Telegram
@@ -39,7 +41,13 @@ import type { Env } from '../types';
 import { extractKeywords, isPersian, translateToPersian } from './enrich';
 import { fetchOgImage } from './ogImage';
 import { DEFAULT_SLIDE_SPACING_MS, renderSlides, type RenderedSlide } from './render';
-import { buildSlideHtml, clampChars, MAX_SLIDES } from './slideTemplate';
+import {
+  buildPairSlideHtml,
+  clampChars,
+  MAX_SLIDESHOW_ITEMS,
+  SLIDE_ITEMS,
+  type PairSlideStory,
+} from './slideTemplate';
 
 export const DEFAULT_BRAND_NAME = 'اخبار فوری';
 /** Telegram hard limit is 1024 characters per media caption. */
@@ -174,18 +182,27 @@ export async function selectSlideshowItems(
   return fresh;
 }
 
-/** One short caption per album photo. Plain text: no parse mode to reject. */
-export function buildSlideCaption(
-  item: { headline: string; sourceName: string; category: { emoji: string } },
-  index: number,
-  total: number
-): string {
-  const lines = [
-    `${item.category.emoji} ${clampChars(item.headline, 170)}`,
-    `📡 منبع: ${clampChars(item.sourceName, 48)} · ${index}/${total}`,
-  ];
-  const caption = lines.join('\n');
-  return caption.length > CAPTION_LIMIT ? `${caption.slice(0, CAPTION_LIMIT - 1)}…` : caption;
+/**
+ * The album's ONE caption: a single date line, nothing else.
+ *
+ * The run ships as pictures only — headline, summary, category and source are
+ * all rendered into the slide — so the caption exists purely to date-stamp the
+ * album. It also has to stay single: Telegram shows a media group as one
+ * swipeable slideshow only while exactly one photo carries a caption, and
+ * `sendMediaGroup` puts this string on the first photo.
+ *
+ *   📰 اخبار فوری — ۱۳ مهر ۱۴۰۵ — ۱۴:۳۰
+ */
+export function buildAlbumCaption(opts: { brand: string; stamp: string }): string {
+  const caption = clampChars(`📰 ${opts.brand} — ${opts.stamp}`, 160);
+  return caption.length > CAPTION_LIMIT ? caption.slice(0, CAPTION_LIMIT) : caption;
+}
+
+/** Splits the run's items into pictures of two (a trailing item rides alone). */
+export function chunkIntoSlides<T>(items: readonly T[], perSlide: number = SLIDE_ITEMS): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += perSlide) chunks.push(items.slice(i, i + perSlide));
+  return chunks;
 }
 
 /** Marks items as delivered. Called only after Telegram confirms. */
@@ -252,7 +269,8 @@ export async function runSlideshowJob(
   const now = opts.now ?? new Date();
   const timeZone = resolveTimeZone(env.TIMEZONE);
   const brand = (env.BRAND_NAME ?? '').trim() || DEFAULT_BRAND_NAME;
-  const limit = readInt(env.SLIDESHOW_MAX_ITEMS, MAX_SLIDES, 1, MAX_SLIDES);
+  // Twelve news items per run: six pictures of two stories each.
+  const limit = readInt(env.SLIDESHOW_MAX_ITEMS, MAX_SLIDESHOW_ITEMS, 1, MAX_SLIDESHOW_ITEMS);
 
   const base: SlideshowResult = {
     status: 'skipped',
@@ -329,25 +347,35 @@ export async function runSlideshowJob(
 
   /* -- 5. render ----------------------------------------------------------- */
   const stamp = jalaliDateTime(now, timeZone);
-  const total = items.length;
-  const pages = items.map((item, i) => {
+  // Two stories per picture: twelve items become six photos, so the whole run
+  // fits in ONE album (Telegram allows ten photos at most).
+  const stories = items.map((item, i) => {
     const category = topicPresentation(item.category, `${item.headline} ${item.summary}`);
     return {
-      meta: { item, category },
-      html: buildSlideHtml({
-        index: i + 1,
-        total,
+      item,
+      category,
+      story: {
         category: { emoji: category.emoji, label: category.label },
         headline: item.headline,
         summary: item.summary,
         keywords: keywordLists[i] ?? [],
         imageUrl: images[i],
         sourceName: item.sourceName,
-        brandName: brand,
-        stamp,
-      }),
+      } satisfies PairSlideStory,
     };
   });
+  const slideGroups = chunkIntoSlides(stories);
+  const total = slideGroups.length;
+  const pages = slideGroups.map((group, i) => ({
+    meta: { items: group.map((entry) => entry.item) },
+    html: buildPairSlideHtml({
+      index: i + 1,
+      total,
+      stories: group.map((entry) => entry.story),
+      brandName: brand,
+      stamp,
+    }),
+  }));
 
   const render = await renderSlides({
     browser: env.BROWSER,
@@ -363,17 +391,10 @@ export async function runSlideshowJob(
   }
 
   /* -- 6. deliver ---------------------------------------------------------- */
-  const captions = render.slides.map((slide, i) =>
-    buildSlideCaption(
-      {
-        headline: slide.meta.item.headline,
-        sourceName: slide.meta.item.sourceName,
-        category: slide.meta.category,
-      },
-      i + 1,
-      render.slides.length
-    )
-  );
+  // ONE date caption for the whole album — the news is in the pictures, and a
+  // second caption would make Telegram split the slideshow into separate
+  // messages.
+  const albumCaption = buildAlbumCaption({ brand, stamp });
 
   let sentMessages: SentMessage[] = [];
   try {
@@ -381,7 +402,8 @@ export async function runSlideshowJob(
       sentMessages = await sendMediaGroup({
         token,
         chatId: destination as DestinationChat,
-        media: render.slides.map((slide, i) => ({ photo: slide.png, caption: captions[i] })),
+        media: render.slides.map((slide) => ({ photo: slide.png })),
+        caption: albumCaption,
         fetchImpl: opts.fetchImpl,
       });
     } else {
@@ -390,7 +412,8 @@ export async function runSlideshowJob(
           token,
           chatId: destination,
           photo: render.slides[0].png,
-          caption: captions[0],
+          // A single picture is not an album, but it carries the same caption.
+          caption: albumCaption,
           fetchImpl: opts.fetchImpl,
         }),
       ];
@@ -404,17 +427,21 @@ export async function runSlideshowJob(
 
   /* -- 7. mark sent, only now --------------------------------------------- */
   // Telegram returns the album messages in the order they were submitted, so
-  // slide i maps to message i and we can keep each slide's own file_id.
-  const delivered = render.slides.map((slide, i) => ({
-    item: slide.meta.item,
-    messageId: sentMessages[i]?.message_id ?? sentMessages[0]?.message_id ?? null,
-    fileId: largestPhotoFileId(sentMessages[i]),
-  }));
+  // picture i maps to message i. Both stories on a picture share that
+  // message's id and file_id, which is exactly what `/slideshow` pages through.
+  const delivered = render.slides.flatMap((slide, i) =>
+    slide.meta.items.map((item) => ({
+      item,
+      messageId: sentMessages[i]?.message_id ?? sentMessages[0]?.message_id ?? null,
+      fileId: largestPhotoFileId(sentMessages[i]),
+    }))
+  );
   await markSlidesSent(env.DB, delivered);
   base.sent = delivered.length;
 
   for (const slide of render.slides) {
-    await archiveSlide(env.MEDIA, slide.meta.item.key, slide.png);
+    // One archived PNG per picture, keyed by its first story.
+    await archiveSlide(env.MEDIA, slide.meta.items[0].key, slide.png);
   }
 
   return {
@@ -425,7 +452,4 @@ export async function runSlideshowJob(
 }
 
 /** Exposed for tests: the shape `renderSlides` hands back for a slideshow. */
-export type SlideshowRenderedSlide = RenderedSlide<{
-  item: SlideshowItem;
-  category: { emoji: string; label: string };
-}>;
+export type SlideshowRenderedSlide = RenderedSlide<{ items: SlideshowItem[] }>;

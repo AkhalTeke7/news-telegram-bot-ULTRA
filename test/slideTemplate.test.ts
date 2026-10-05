@@ -28,8 +28,8 @@ describe('slide geometry', () => {
   it('is the 1080x1350 portrait the spec asks for', () => {
     expect(SLIDE_WIDTH).toBe(1080);
     expect(SLIDE_HEIGHT).toBe(1350);
-    // Telegram albums hold at most 10 photos.
-    expect(MAX_SLIDES).toBe(10);
+    // Six pictures of two news each: the 12 top stories of a run.
+    expect(MAX_SLIDES).toBe(6);
   });
 });
 

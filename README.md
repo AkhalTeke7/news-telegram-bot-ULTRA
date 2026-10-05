@@ -3,12 +3,15 @@
 Persian (Farsi) RTL news bot on Cloudflare Workers. Every two hours it collects news from public
 Telegram channels and configured RSS feeds, filters advertisements, summarizes and ranks
 stories with **free OpenRouter models only**, renders the run as a white-template
-**slideshow** (a Telegram `sendMediaGroup` album in which every slide covers four news
-items — their AI headline and introductory text in a fixed 2×2 layout) with Cloudflare
-Browser Run, and publishes the album plus Telegram Rich Messages
-text digests to Telegram and, when configured, mirrors the same output to Bale. Digest
-headlines use the AI topic category for a related emoji, and every story includes its title,
-summary details, and available key points.
+**slideshow** (a Telegram `sendMediaGroup` album of **six pictures carrying two news
+each — the top twelve stories of the run**, their AI headline and introductory text side
+by side) with Cloudflare Browser Run, and publishes that album to Telegram and, when
+configured, mirrors the same pictures to Bale.
+
+**The bot posts pictures only.** There are no text digest messages anywhere in the
+publish path: everything a reader sees — the topic emoji, the AI headline, the summary and
+the source channel — is rendered into the picture. The album carries a single short
+brand/date caption on its first photo and nothing else.
 
 RSS sources currently include BBC Persian, Zoomit, Mobile.ir, and IRIB News. No paid
 models, MTProto, or committed credentials are required. Chat completions run through
@@ -22,8 +25,8 @@ Cron (every two hours, at even Tehran hours)
   └─ filter    → local advertisement filter      → filter_status    (no AI, no network)
   └─ summarize → POST https://openrouter.ai/api/v1/chat/completions → summary_text + title
   └─ rank      → one global AI comparison        → importance (1–5)
-  └─ publish   → Browser Run slide screenshots (4 news each) + Telegram sendMediaGroup album
-             └─ text digest → Telegram sendRichMessage / Bale sendMessage
+  └─ publish   → Browser Run slide screenshots (2 news each, 6 max) → Telegram sendMediaGroup album
+             └─ Bale mirror → one sendPhoto per picture (no album transport, no text)
 ```
 
 Each stage is isolated: one failing channel, message, or model never stops the rest.
@@ -128,6 +131,7 @@ npx wrangler secret put TELEGRAM_DESTINATION_CHANNEL   # @your_channel or -10012
 npx wrangler secret put BALE_DESTINATION_CHANNEL       # @channel or numeric chat id
 npx wrangler secret put TELEGRAM_ADMIN_USER_ID         # numeric Telegram User.id
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET        # X-Telegram-Bot-Api-Secret-Token
+npx wrangler secret put TELEGRAM_SECURITY_CHANNEL      # optional: the HUNT digest channel
 ```
 
 | Variable | Secret | Purpose |
@@ -141,6 +145,7 @@ npx wrangler secret put TELEGRAM_WEBHOOK_SECRET        # X-Telegram-Bot-Api-Secr
 | `BALE_DESTINATION_CHANNEL` | yes (configuration, kept server-side) | Bale destination: `@channel` or numeric chat id. |
 | `TELEGRAM_ADMIN_USER_ID` | yes | Numeric Telegram `User.id` allowed to administer the bot over Telegram. |
 | `TELEGRAM_WEBHOOK_SECRET` | yes | Value Telegram echoes back in `X-Telegram-Bot-Api-Secret-Token`; must be ≥16 chars. |
+| `TELEGRAM_SECURITY_CHANNEL` | optional | Destination of the daily English security / bug-bounty digest. **Unset ⇒ that job silently posts nothing.** It can also be set at runtime from the 🎯 HUNT console, which takes precedence; `MAIN` points it at the main news channel. |
 
 `TELEGRAM_DESTINATION_CHANNEL` accepts `@channel_username` or a numeric channel id such as
 `-1001234567890`. It is read only in `src/publisher.ts` and is never returned by an API,
@@ -156,8 +161,9 @@ seconds. Both accept milliseconds; `0` disables the spacing.
 ## Bale delivery
 
 Bale delivery mirrors the Telegram output through the official Bale Business Bot API at
-`https://tapi.bale.ai/business/bot`: every album slide (`sendPhoto`, PNG multipart, with
-its caption) and every **delivered** text digest part (`sendMessage`). Add the Bale bot
+`https://tapi.bale.ai/business/bot`. Bale has no album transport, so the run's pictures
+go out as **separate `sendPhoto` messages** (PNG multipart), the date caption riding on
+the first one only — same images, same order, still no text message. Add the Bale bot
 to the destination channel with permission to post, then configure `BALE_BOT_TOKEN` and
 `BALE_DESTINATION_CHANNEL` (both are required; without them publishing stays
 Telegram-only).
@@ -166,7 +172,7 @@ The mirror is best-effort and fully isolated: a Bale failure is logged under the
 `bale` operation with a safe reason and counted in the run report
 (`publishing.bale.sent` / `failed`, shown as a «بیل: …» line in the Telegram manual-run
 report), but never affects Telegram delivery or `published_at` state. Only parts Telegram
-actually delivered are mirrored, so a later retry of an undelivered part cannot
+actually delivered are mirrored, so a later retry of an undelivered picture cannot
 duplicate on Bale. Bale calls carry a 15-second timeout so one slow request cannot
 consume the invocation budget.
 
@@ -174,106 +180,88 @@ Bale credentials must never be placed in `wrangler.json`, committed to Git, or i
 in `.dev.vars` committed files. Use `wrangler secret put` for tokens. Destination IDs
 are also kept server-side to avoid exposing deployment configuration through the API.
 
-## Publishing format
+## Publishing format: pictures, and nothing else
 
-Each source channel produces **one destination message** per run, in configured channel
-order, containing that channel's news oldest → newest. There is no header; the channel and
-the destination appear only once each, as publishing metadata in the footer:
+A run produces **one Telegram message**: the album. No per-channel digest, no headline
+list, no footer message — `runPublishing()` never calls `sendMessage`, and the publisher
+exports no digest builder. Everything readable is baked into the pictures:
 
-```
-امام جمعه مشهد اعلام کرد که مراسم این هفته برگزار می‌شود.
+* topic emoji and AI headline per news item;
+* the introductory text (summary) under it;
+* the source channel on the card, and the destination signature in the slide footer;
+* the Tehran date/time and the «اسلاید ۲ از ۶» counter in the slide header.
 
-همزمان وزیر راه از باز شدن ۲۰ کیلومتر مسیر جدید خبر داد که درآمد سالانهٔ آن ۴۰ میلیارد تومان است.
+The run's eligible news is ordered by importance, capped at the **top twelve items**, and
+laid out **two per picture → at most six pictures**. Anything beyond twelve stays pending
+and is picked up by the next run; items the ranker scored 1 are retired instead (counted
+as `publishing.retired` in the run report). Channels are never merged and never produce a
+message of their own — a channel simply contributes its news to the shared album.
 
-منبع: @news1
-@destination_channel
-```
+No URLs reach the picture either (Eitaa, `t.me`, `telegram.me`, `www.`, bare domains and
+any other link are stripped before the AI ever sees the text; see the filter section).
 
-The publisher owns that metadata; the AI never writes it. The footer is produced by the
-publisher from the real source channel and `TELEGRAM_DESTINATION_CHANNEL` (which is
-normalized for display only — the actual Telegram target is unchanged). Telegram text is sent
-through the Rich Messages API as an RTL HTML document (`sendRichMessage`), with entity
-detection disabled so the already-escaped digest markup stays intact. Bale receives the same
-HTML through its ordinary HTML parse mode. A channel with no publishable news sends nothing.
-Channels are never merged. The message contains only the summaries and that footer — no post
-text, no message/database ids, no model name, no filter data, and **no URLs** (Eitaa, `t.me`,
-`telegram.me`, `www.`, bare domains or any other link is stripped before the AI ever sees it;
-see the filter section).
+Per-run safety bound: the whole publish path costs at most
+`MAX_ALBUM_SUBREQUESTS = 7` subrequests — one Browser Run render per picture plus one
+`sendMediaGroup` — well inside the Workers **Free** limit of 50 subrequests per
+invocation, whatever the number of enabled channels. Nothing is spent at all when no
+`BROWSER` binding is configured.
 
-Only Telegram's 4096-character limit can split a channel's output; the length calculation
-includes every summary, the blank lines and both footer lines. A summary is never cut to
-fit — a new part is started, and each part repeats the same footer. A single summary too
-long to fit alone is trimmed deterministically so the footer always survives.
+Items are marked `published_at` (with `telegram_destination_message_id`) only after
+Telegram confirms the album, so a failed or rate-limited run is retried next time without
+duplicating what already went out. Both news items on picture *i* record that picture's
+message id and `file_id`.
 
-Per-run safety bound: publishing spends whatever is left of the Workers **Free** limit of
-50 subrequests per invocation, after reserving room for what earlier stages need — one
-fetch per enabled source channel for collection, up to 20 for summarization, one for the
-model list, and the run album's real cost — one Browser Run render per slide plus one
-`sendMediaGroup` (nothing at all when no `BROWSER` binding is configured).
-`publishMessageBudget(enabledChannels, imageReserve)` in `src/publisher.ts` computes
-it and caps it at `MAX_MESSAGES_PER_RUN = 40`. There is **no**
-per-channel or global row cap, so current-window news is never silently postponed. When the
-bound is reached the remaining rows are recorded with the explicit `run_limit` category and
-stay unpublished, so the next run continues with them in the same configured order (verified:
-an 18-channel setup and a 200-item backlog both drain completely across runs, each item
-delivered exactly once).
-
-Items are marked `published_at` (with `telegram_destination_message_id`) only after Telegram
-confirms each delivered message, so a failed or rate-limited part is retried next run
-without duplicating what already went out.
-
-## AI importance and the news slideshow (four items per slide)
+## AI importance and the news slideshow (two news per picture)
 
 After summaries are created, one global OpenRouter ranking request compares eligible news
 across all enabled source channels and stores an `importance` score from 1 to 5. Score 1
-means the item is not important enough for the visual; scores 2–5 are eligible. The
-ranking is persisted in D1, so image selection is deterministic and independent of
-channel order. Legacy rows with a null score remain eligible as a migration fallback.
+means the item is not important enough to publish; scores 2–5 are eligible. The ranking is
+persisted in D1, so image selection is deterministic and independent of channel order.
+Legacy rows with a null score remain eligible as a migration fallback.
 
 When `BROWSER` is configured, publishing renders the run as a real Telegram **slideshow**:
 the run's eligible news (every item with an AI headline and introductory text, importance
-≠ 1, most important first) is split into slides of **four items**, each slide is laid out
-by ONE fixed white-template HTML frame with clearly defined sections — header (run title,
-«گزارش خبری خودکار» kicker with the slide number «اسلاید ۲ از ۵», Tehran date/time stamp),
-news board (the constant 2×2 grid: topic emoji, headline, introductory text, source label
-per item), optional overflow ticker, and footer (source credits + signature). Browser Run
-rasterizes each slide at 2560×1440 and Telegram delivers them together through
-`sendMediaGroup` — a swipeable album in the channel. A single slide is sent as an ordinary
-`sendPhoto`, because a media group needs at least two items; the trailing partial slide
-(fewer than four items left) keeps the same template and simply fills the board.
+≠ 1, most important first) is capped at twelve items and split into pictures of **two**,
+each laid out by ONE fixed white-template HTML frame with clearly defined sections —
+header (run title, «گزارش خبری خودکار» kicker with the picture number «اسلاید ۲ از ۶»,
+Tehran date/time stamp), news board (the fixed two-card grid: topic emoji, headline,
+introductory text, source label per card), and footer (source credits + signature).
+Browser Run rasterizes each picture and Telegram delivers them together through
+`sendMediaGroup` — a swipeable album in the channel. A single picture is sent as an
+ordinary `sendPhoto`, because a media group needs at least two items; a trailing odd news
+item keeps the same template and simply fills one card.
 
-Because every slide covers four news items, the whole run's news rides in the slideshow —
-nothing is demoted to a one-line ticker while slide capacity remains. The album holds at
-most ten slides (Telegram's media-group limit = 40 news items); only beyond that does the
-last slide grow the «سایر عناوین» ticker strip and caption overflow line again. Captions
-are plain text (no parse mode, so nothing can be rejected): the first slide carries the
-run header («اخبار لحظه‌ای» + Tehran date/time), every slide lists its items' headlines
-with their source channels, and the last slide appends the overflow headlines if any.
+Twelve news on six pictures means the whole run rides in the pictures — nothing is
+demoted to a one-line ticker while capacity remains, and six photos sit comfortably under
+Telegram's ten-per-album limit.
+
+The album carries **exactly one caption, on its first photo** — that is what makes
+Telegram show the pictures as a single item you swipe (or arrow) through. Captioning every
+photo makes the clients split the group into one message per photo, which is not a
+slideshow, so `sendMediaGroup()` takes a single album-level caption and the per-photo
+caption field does not exist. That caption is deliberately tiny: a plain-text brand and
+date line, «📰 اخبار لحظه‌ای — ۱۴۰۵/۰۷/۱۳ - ۱۴:۳۰ تهران», with no parse mode (so nothing can
+be rejected), no headline index, no source and no link. The news itself is in the picture.
 
 Browser Run limits are respected explicitly: renders are spaced by
 `IMAGE_RENDER_SPACING_MS` (default 10.5s, matching the Workers Free plan's ~1 Quick
 Action per 10 seconds), a single HTTP 429 is retried once, and after a second 429 the
-remaining slides are skipped instead of hammering — the album degrades to fewer slides
+remaining pictures are skipped instead of hammering — the album degrades to fewer pictures
 rather than failing the run. PNGs are never stored in D1 or R2; they exist only for the
-duration of the send. Album failure is isolated, so the ordinary per-channel text
-digests still publish. When configured, every album slide is mirrored to Bale
-(`sendPhoto`) as well. The `/testimage` admin command exercises this exact path — it
-renders the real pending slides with the same spacing setting.
+duration of the send. If rendering or the album send fails there is **no text fallback**:
+nothing is published and every item stays pending for the next run. When configured, every
+picture is mirrored to Bale (`sendPhoto`) as well. The `/testimage` admin command
+exercises this exact path — it renders the real pending pictures with the same spacing
+setting.
 
 
-### Rich text transport
-
-The text digest is built as escaped HTML and passed through the zero-runtime-dependency
-[`tg-rich-messages`](https://github.com/vdistortion/tg-rich-messages) builder. Telegram receives
-its `toInputRichMessage()` payload through `sendRichMessage`, including `is_rtl: true` and
-`skip_entity_detection: true`. If a deployment is still on a Bot API version that rejects the
-Rich Messages method, the publisher makes one compatibility fallback to ordinary
-`sendMessage` with `parse_mode: HTML`; network, rate-limit, and content errors are never
-silently retried.
+### Image transport
 
 The slideshow is the album above: `sendMediaGroup` with multipart-uploaded PNGs, so no
-public image URLs are needed. The library's URL-backed `<tg-slideshow>` block is not
-used for the news images.
+public image URLs are needed and nothing has to be hosted anywhere. There is no text
+transport left in the publish path — the Rich Messages / HTML digest sender was removed
+when the bot became picture-only. The only text the bot still sends is operational: the
+Persian admin reports in the private admin chat (manual run, `/testimage`, status).
 
 ## OpenRouter free-tier rate limits
 
@@ -326,6 +314,51 @@ gets the same verdict.
   stay in D1 for tracking and deduplication.
 * No domain is ever fetched or resolved — external links are matched as text only.
 
+## 🎯 HUNT — the security / bug-bounty console
+
+The daily English writeup digest (see
+[`docs/TASK6-SECURITY-DIGEST.md`](./docs/TASK6-SECURITY-DIGEST.md)) used to have no face
+at all: it is a cron job whose most common failure — no `TELEGRAM_SECURITY_CHANNEL`
+configured — is a *silent skip*. Nothing appeared in the channel, nothing appeared in the
+panel, and the only way to tell the difference between "misconfigured", "feeds dead" and
+"nothing newsworthy today" was `wrangler tail` at the right minute.
+
+The admin panel now has a **🎯 HUNT** button in its header (and a second one in
+«ابزارها و آزمون», so it is hard to miss). It switches the same authenticated page to a
+second view — LTR and English, because the digest is — and leaves a real URL behind:
+**`/hunt`** can be reloaded, bookmarked or shared, and opens straight into the console
+(the older `#hunt` anchor still works). No second login, no separate deployment. It gives
+you:
+
+* **Status** — is a channel configured and where from (panel or secret, always masked),
+  is the bot token present, the cron, the last run and its detail, today's claim, how many
+  LLM providers are configured, and how many articles have ever been delivered. Underneath
+  sits one plain-English line naming the *reason* the digest is or is not posting.
+* **Destination channel** — set `@your_channel` (or a numeric id, or `MAIN`) and the next
+  run uses it. Stored in D1, so no redeploy and no secret rotation; clearing it falls back
+  to the `TELEGRAM_SECURITY_CHANNEL` secret. The value is never echoed back in full.
+* **Feeds** — one button fetches all six sources live and shows, per feed: HTTP outcome,
+  items parsed, items kept by the relevance filter, items **not yet posted**, how old the
+  newest entry is, and three real headlines with a ✓ against the ones that would be used.
+  A feed answering `200` with an HTML login page — the dangerous failure — shows as
+  `0 items`.
+* **Run** — `preview` builds tonight's digest and shows the exact message *without*
+  sending it, claiming the day or writing the dedupe ledger, so it is safe to press at any
+  time; `send now` performs a real run (which the once-a-day claim may refuse); `force
+  send` overrides that claim and will post a second time today (confirmation required).
+* **Already delivered** — the `security_seen` ledger, which is why an article is never
+  posted twice.
+
+Everything there is behind the same admin session as the rest of `/api`, and the four
+endpoints are listed in [Admin API](#admin-api).
+
+The panel's own JavaScript lives inside a TypeScript template literal, where one bad
+escape ships a page whose script throws — which looks exactly like a button that does
+nothing, and which the Worker test suite cannot catch (it runs in workerd, where `eval`
+is forbidden). `npm run check:ui` therefore drives the real page script against a small
+DOM and *clicks* the buttons: boot with and without a session, open the console from both
+entry points, load `/hunt` directly, probe the feeds, preview a digest, and go back.
+
 ## Telegram administration
 
 The admin can manage everything from Telegram with the same bot that publishes the news.
@@ -370,10 +403,12 @@ it.
 panel) tests ONLY the image path, end to end, with **real** news:
 
 - it reads the actual pending publishable rows from D1 (exactly what the next run would
-  publish), renders them through Browser Run (top-4 cards + ticker) and sends just the
-  PNG to the destination with `sendPhoto`;
+  publish), renders them through Browser Run (up to twelve news as six pictures of two)
+  and sends just the album to the destination with `sendMediaGroup` — `sendPhoto` when a
+  single picture came out of it;
 - **nothing is marked published** — the next real run still publishes every row normally;
-  no text digests are sent;
+  no text message is sent to the destination, only the Persian report back to the admin
+  chat;
 - when there is no pending news (or every row scored importance 1) it replies
   «خبری در انتظار انتشار نیست» and sends nothing;
 - failure categories: `no_news`, `browser_missing`, `destination_not_configured`,
@@ -381,8 +416,8 @@ panel) tests ONLY the image path, end to end, with **real** news:
   categories (`rate_limited`, `network`, `telegram_error`).
 
 The implementation is `sendTestImage()` in `src/testImage.ts`; the API equivalent is the
-authenticated `POST /api/telegram/test-image` (200 with `{messageId, cards, ticker,
-bytes}`, 404 for no news, 503 for missing configuration, 502/429 for Telegram failures). It never throws: every failure comes back as a safe Persian reason with a stable
+authenticated `POST /api/telegram/test-image` (200 with `{messageId, slides, items,
+ticker, bytes}`, 404 for no news, 503 for missing configuration, 502/429 for Telegram failures). It never throws: every failure comes back as a safe Persian reason with a stable
 category (`destination_not_configured`, `invalid_destination`, `token_missing`,
 `rate_limited`, `network`, `telegram_error`). Telegram's own rejection description (e.g.
 `Bad Request: chat not found`) is shown to the admin because it is the fastest way to spot
@@ -524,6 +559,7 @@ another CI pipeline, make sure the build command installs dependencies
 
 | Method | Path | Notes |
 |---|---|---|
+| GET | `/` · `/hunt` | the admin panel; `/hunt` opens the 🎯 HUNT console view of the same page |
 | GET | `/api/health` | public liveness |
 | POST | `/api/telegram/webhook` | Telegram updates; requires `X-Telegram-Bot-Api-Secret-Token` |
 | POST | `/api/auth/login` | `{password}` → signed HttpOnly cookie |
@@ -535,7 +571,11 @@ another CI pipeline, make sure the build command installs dependencies
 | DELETE | `/api/channels/:id` | 204 |
 | GET | `/api/status` | counts, timestamps, error categories (no secrets) |
 | POST | `/api/telegram/test-message` | sends a test message to the destination; `{messageId}` on success, 503/502/429 with a Persian reason otherwise (no secrets) |
-| POST | `/api/telegram/test-image` | renders the real pending news and sends only the image; `{messageId, cards, ticker, bytes}` on success, 404 no news, 503 config, 502/429 Telegram |
+| POST | `/api/telegram/test-image` | renders the real pending news and sends only the album; `{messageId, slides, items, ticker, bytes}` on success, 404 no news, 503 config, 502/429 Telegram |
+| GET | `/api/security/overview` | HUNT console: destination state (masked), schedule, last run, today's claim, delivered-item ledger, source list |
+| POST | `/api/security/channel` | `{channel}` — sets or clears (`null`) the security digest channel; 400 on anything that is not `@username`, a numeric id or `MAIN`. The value is never echoed back in full |
+| POST | `/api/security/feeds/probe` | live fetch of every enabled security feed: items, items kept by the filter, unposted items, staleness, three sample headlines |
+| POST | `/api/security/run` | `{mode}` — `preview` (default; builds the digest, sends/claims/records nothing), `send` (normal run, the daily claim may refuse), `force` (ignores the claim) |
 
 Write endpoints require `content-type: application/json` and the session cookie
 (`HttpOnly`, `Secure`, `SameSite=Strict`), which blocks CSRF.

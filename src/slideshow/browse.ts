@@ -96,6 +96,11 @@ export interface StoredSlide {
  *
  * Rows without a `file_id` (sent before this feature, or by a Telegram
  * response we could not parse) are skipped: there is nothing to re-send.
+ *
+ * One picture carries TWO news items, so two rows share a `file_id`. They are
+ * folded back into a single browsable slide here — otherwise `/slideshow`
+ * would page through the same photo twice — and both headlines are kept so
+ * the caption describes everything the picture shows.
  */
 export async function loadLatestSlides(db: D1Database, limit = MAX_SLIDES): Promise<StoredSlide[]> {
   const latest = await db
@@ -131,12 +136,22 @@ export async function loadLatestSlides(db: D1Database, limit = MAX_SLIDES): Prom
     link: string;
   }>();
 
-  return (results ?? []).map((row) => ({
-    fileId: String(row.file_id),
-    title: String(row.title ?? ''),
-    source: String(row.source ?? ''),
-    link: String(row.link ?? ''),
-  }));
+  const byFileId = new Map<string, StoredSlide>();
+  for (const row of results ?? []) {
+    const fileId = String(row.file_id);
+    const title = String(row.title ?? '');
+    const source = String(row.source ?? '');
+    const existing = byFileId.get(fileId);
+    if (!existing) {
+      byFileId.set(fileId, { fileId, title, source, link: String(row.link ?? '') });
+      continue;
+    }
+    if (title) existing.title = existing.title ? `${existing.title} • ${title}` : title;
+    if (source && !existing.source.includes(source)) {
+      existing.source = existing.source ? `${existing.source} · ${source}` : source;
+    }
+  }
+  return [...byFileId.values()];
 }
 
 /** Caption shown under a browsed slide. Plain text, no parse mode. */

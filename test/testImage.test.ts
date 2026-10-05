@@ -56,8 +56,12 @@ function harness(opts: { png?: ArrayBuffer | null; photoStatus?: number } = {}) 
       });
     }),
   };
+  const albums: { caption?: string }[][] = [];
   const fetchImpl = vi.fn(async (url: unknown, init: RequestInit) => {
     calls.push({ url: String(url), body: init.body ? String(init.body) : undefined });
+    if (init.body instanceof FormData && init.body.has('media')) {
+      albums.push(JSON.parse(String(init.body.get('media'))));
+    }
     const status = opts.photoStatus ?? 200;
     // A media group answers with an ARRAY of messages; everything else with one.
     const isGroup = String(url).includes('sendMediaGroup');
@@ -73,7 +77,7 @@ function harness(opts: { png?: ArrayBuffer | null; photoStatus?: number } = {}) 
       { status, headers: { 'content-type': 'application/json' } }
     );
   }) as unknown as typeof fetch;
-  return { browser, fetchImpl, calls };
+  return { browser, fetchImpl, calls, albums };
 }
 
 interface Sent {
@@ -179,19 +183,26 @@ afterEach(() => {
 
 describe('sendTestImage', () => {
   it('renders the REAL pending news and sends only the album', async () => {
-    await seedNews(6); // 2 slides of four news (4 + 2), no overflow
+    await seedNews(6); // 3 pictures of two news each, no overflow ticker
     const h = harness();
 
     const result = await sendTestImage(baseEnv({ BROWSER: h.browser }), {
       fetchImpl: h.fetchImpl,
     });
 
-    expect(result).toMatchObject({ ok: true, messageId: 707, slides: 2, items: 6, ticker: 0 });
+    expect(result).toMatchObject({ ok: true, messageId: 707, slides: 3, items: 6, ticker: 0 });
 
-    // One Browser Run request per slide, and exactly one Telegram album send.
-    expect(h.browser.quickAction).toHaveBeenCalledTimes(2);
+    // One Browser Run request per picture, and exactly one Telegram album send.
+    expect(h.browser.quickAction).toHaveBeenCalledTimes(3);
     expect(h.calls).toHaveLength(1);
     expect(h.calls[0].url).toBe(`https://api.telegram.org/bot${BOT_TOKEN}/sendMediaGroup`);
+
+    // The album carries ONE caption, on its first photo, so Telegram renders
+    // the slides as a single swipeable item instead of two messages.
+    expect(h.albums).toHaveLength(1);
+    expect(h.albums[0]).toHaveLength(3);
+    expect(h.albums[0].filter((item) => item.caption !== undefined)).toHaveLength(1);
+    expect(h.albums[0][0].caption).toContain('📰 اخبار لحظه‌ای');
 
     // The rendered HTML carries the real summaries (one card per render).
     // (quickAction payload is asserted through the html the browser receives.)
@@ -384,8 +395,8 @@ describe('/testimage command and img:test button', () => {
       r
     );
 
-    // One Browser Run request per slide + one sendMediaGroup, and no sendMessage anywhere.
-    expect(h.browser.quickAction).toHaveBeenCalledTimes(2);
+    // One Browser Run request per picture + one sendMediaGroup, and no sendMessage anywhere.
+    expect(h.browser.quickAction).toHaveBeenCalledTimes(3);
     expect(h.calls).toHaveLength(1);
     expect(h.calls[0].url).toContain('/sendMediaGroup');
 
@@ -427,7 +438,8 @@ describe('/testimage command and img:test button', () => {
 
     await handleTelegramUpdate(cb('img:test') as TelegramUpdate, baseEnv({ BROWSER: h.browser }), undefined, r);
 
-    expect(h.browser.quickAction).toHaveBeenCalledTimes(1);
+    // Three news = two pictures (2 + 1).
+    expect(h.browser.quickAction).toHaveBeenCalledTimes(2);
     expect(r.edited).toHaveLength(1);
     expect(r.edited[0].text).toContain('✅');
   });
@@ -457,7 +469,7 @@ describe('POST /api/telegram/test-image', () => {
 
     expect(res.status).toBe(200);
     expect(body).toContain('"messageId":707');
-    expect(body).toContain('"slides":2');
+    expect(body).toContain('"slides":3');
     expect(body).toContain('"items":6');
     expect(body).toContain('"ticker":0');
     expect(body).not.toContain(BOT_TOKEN);

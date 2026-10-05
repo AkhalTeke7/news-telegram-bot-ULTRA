@@ -4,7 +4,8 @@ import { isPersian, verifyKeywords } from '../src/slideshow/enrich';
 import { extractOgImage, fetchOgImage, resolveImageUrl } from '../src/slideshow/ogImage';
 import { readPngSize, renderSlides } from '../src/slideshow/render';
 import {
-  buildSlideCaption,
+  buildAlbumCaption,
+  chunkIntoSlides,
   runSlideshowJob,
   selectSlideshowItems,
   slideItemKey,
@@ -347,25 +348,19 @@ describe('selectSlideshowItems', () => {
 /* -------------------------------------------------------------- captions -- */
 
 describe('captions and keyboard', () => {
-  it('builds a short caption with the category emoji and counter', () => {
-    const caption = buildSlideCaption(
-      { headline: 'نرخ بهره ثابت ماند', sourceName: 'رویترز', category: { emoji: '💰' } },
-      3,
-      10
-    );
-    expect(caption).toContain('💰 نرخ بهره ثابت ماند');
-    expect(caption).toContain('منبع: رویترز');
-    expect(caption).toContain('3/10');
+  it('is one brand + date line — the news lives in the pictures', () => {
+    const caption = buildAlbumCaption({ brand: 'اخبار فوری', stamp: '۱۴۰۵/۰۷/۱۲ ساعت ۱۴:۳۰' });
+
+    expect(caption).toBe('📰 اخبار فوری — ۱۴۰۵/۰۷/۱۲ ساعت ۱۴:۳۰');
+    expect(caption.split('\n')).toHaveLength(1);
+    expect(caption).not.toContain('منبع');
+    expect(caption).not.toContain('http');
     // Telegram's hard cap is 1024.
     expect(caption.length).toBeLessThanOrEqual(1024);
   });
 
-  it('truncates an absurdly long headline', () => {
-    const caption = buildSlideCaption(
-      { headline: 'ت'.repeat(2000), sourceName: 'س'.repeat(200), category: { emoji: '💰' } },
-      1,
-      1
-    );
+  it('stays short even with an absurd brand name', () => {
+    const caption = buildAlbumCaption({ brand: 'ب'.repeat(2000), stamp: '۱۴۰۵/۰۷/۱۲' });
     expect(caption.length).toBeLessThanOrEqual(1024);
   });
 
@@ -376,6 +371,12 @@ describe('captions and keyboard', () => {
     for (const button of row) {
       expect((button.callback_data ?? '').length).toBeLessThanOrEqual(64);
     }
+  });
+
+  it('packs the run into pictures of two stories', () => {
+    expect(chunkIntoSlides([1, 2, 3, 4, 5])).toEqual([[1, 2], [3, 4], [5]]);
+    expect(chunkIntoSlides(Array.from({ length: 12 }, (_, i) => i))).toHaveLength(6);
+    expect(chunkIntoSlides([])).toEqual([]);
   });
 
   it('builds a browse caption with the link', () => {
@@ -419,7 +420,7 @@ describe('runSlideshowJob', () => {
     expect(result.reason).toBe('browser_binding_missing');
   });
 
-  it('renders, sends one album and only then records the items', async () => {
+  it('renders pictures of two, sends one album and only then records the items', async () => {
     const channelId = await seedChannel();
     for (let i = 1; i <= 3; i++) {
       await seedMessage(channelId, {
@@ -431,14 +432,17 @@ describe('runSlideshowJob', () => {
     }
 
     const calls: string[] = [];
-    const fetchImpl: typeof fetch = async (input) => {
+    let albumMedia: { caption?: string }[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
       calls.push(url);
       if (url.includes('/sendMediaGroup')) {
+        const form = (init as RequestInit).body as FormData;
+        albumMedia = JSON.parse(String(form.get('media')));
         return new Response(
           JSON.stringify({
             ok: true,
-            result: [1, 2, 3].map((n) => ({
+            result: [1, 2].map((n) => ({
               message_id: 500 + n,
               date: 0,
               photo: [{ file_id: `file-${n}`, file_unique_id: `u${n}`, width: 1080, height: 1350 }],
@@ -462,22 +466,32 @@ describe('runSlideshowJob', () => {
     );
 
     expect(result.status).toBe('success');
-    expect(result.rendered).toBe(3);
+    // Three stories ride on two pictures: 2 + 1.
+    expect(result.candidates).toBe(3);
+    expect(result.rendered).toBe(2);
     expect(result.sent).toBe(3);
     expect(result.withImage).toBe(3);
 
     // Exactly ONE album call, never one message per item.
     expect(calls.filter((c) => c.includes('/sendMediaGroup'))).toHaveLength(1);
     expect(calls.filter((c) => c.includes('/sendPhoto'))).toHaveLength(0);
+    expect(calls.filter((c) => c.includes('/sendMessage'))).toHaveLength(0);
+
+    // …and exactly ONE caption inside it, on the first photo. Telegram only
+    // shows the group as a swipeable slideshow when no other photo has one,
+    // and that caption is the date line — never a headline.
+    expect(albumMedia).toHaveLength(2);
+    expect(albumMedia.filter((m) => m.caption !== undefined)).toHaveLength(1);
+    expect(albumMedia[0].caption).toContain('📰 اخبار فوری');
+    expect(albumMedia[0].caption).not.toContain('خبر 1');
 
     const rows = await env.DB.prepare(
       `SELECT item_key, file_id, message_id FROM slideshow_sent ORDER BY item_key`
     ).all<{ item_key: string; file_id: string; message_id: number }>();
     expect(rows.results).toHaveLength(3);
-    // Each slide keeps its OWN file_id, which is what /slideshow pages through.
-    expect(new Set(rows.results.map((r) => r.file_id))).toEqual(
-      new Set(['file-1', 'file-2', 'file-3'])
-    );
+    // Both stories of a picture share that picture's file_id, which is what
+    // /slideshow pages through (it folds them back into one slide).
+    expect(new Set(rows.results.map((r) => r.file_id))).toEqual(new Set(['file-1', 'file-2']));
 
     // A second run has nothing left to send.
     const again = await runSlideshowJob(
@@ -492,7 +506,8 @@ describe('runSlideshowJob', () => {
 
   it('marks NOTHING as sent when Telegram rejects the album', async () => {
     const channelId = await seedChannel();
-    for (let i = 1; i <= 2; i++) {
+    // Four stories = two pictures, so the job takes the album path.
+    for (let i = 1; i <= 4; i++) {
       await seedMessage(channelId, {
         id: i,
         title: `خبر ${i}`,
@@ -526,9 +541,9 @@ describe('runSlideshowJob', () => {
     expect(results).toHaveLength(0);
   });
 
-  it('uses sendPhoto when only one slide survived rendering', async () => {
+  it('uses sendPhoto when only one picture survived rendering', async () => {
     const channelId = await seedChannel();
-    for (let i = 1; i <= 2; i++) {
+    for (let i = 1; i <= 4; i++) {
       await seedMessage(channelId, {
         id: i,
         title: `خبر ${i}`,
@@ -572,16 +587,19 @@ describe('runSlideshowJob', () => {
       { sleepImpl: noSleep, spacingMs: 0, fetchImpl }
     );
 
+    // Four stories = two pictures; only the first rendered, carrying 2 stories.
     expect(result.status).toBe('partial');
-    expect(result.sent).toBe(1);
+    expect(result.rendered).toBe(1);
+    expect(result.sent).toBe(2);
     expect(calls.filter((c) => c.includes('/sendPhoto'))).toHaveLength(1);
+    expect(calls.filter((c) => c.includes('/sendMediaGroup'))).toHaveLength(0);
     const { results } = await env.DB.prepare(`SELECT item_key FROM slideshow_sent`).all();
-    expect(results).toHaveLength(1);
+    expect(results).toHaveLength(2);
   });
 
-  it('respects SLIDESHOW_MAX_ITEMS and never exceeds 10', async () => {
+  it('respects SLIDESHOW_MAX_ITEMS and never exceeds 12 news on 6 pictures', async () => {
     const channelId = await seedChannel();
-    for (let i = 1; i <= 12; i++) {
+    for (let i = 1; i <= 20; i++) {
       await seedMessage(channelId, {
         id: i,
         title: `خبر ${i}`,
@@ -590,14 +608,19 @@ describe('runSlideshowJob', () => {
       });
     }
 
-    const fetchImpl: typeof fetch = async (input) => {
+    let albumSize = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
       if (String(input).includes('/sendMediaGroup')) {
-        const body = (await (input as never as Request)) as unknown;
-        void body;
+        const form = (init as RequestInit).body as FormData;
+        albumSize = (JSON.parse(String(form.get('media'))) as unknown[]).length;
         return new Response(
           JSON.stringify({
             ok: true,
-            result: Array.from({ length: 10 }, (_, n) => ({ message_id: n, date: 0 })),
+            result: Array.from({ length: albumSize }, (_, n) => ({
+              message_id: n,
+              date: 0,
+              photo: [{ file_id: `f${n}`, file_unique_id: `u${n}`, width: 1080, height: 1350 }],
+            })),
           }),
           { headers: { 'content-type': 'application/json' } }
         );
@@ -608,13 +631,16 @@ describe('runSlideshowJob', () => {
     const result = await runSlideshowJob(
       {
         ...baseEnv(),
-        SLIDESHOW_MAX_ITEMS: '99', // clamped to the Telegram album limit
+        SLIDESHOW_MAX_ITEMS: '99', // clamped to twelve news per run
         BROWSER: { quickAction: async () => new Response(pngBuffer(), { status: 200 }) },
       } as never,
       { sleepImpl: noSleep, spacingMs: 0, fetchImpl }
     );
 
-    expect(result.candidates).toBe(10);
-    expect(result.sent).toBe(10);
+    expect(result.candidates).toBe(12);
+    expect(result.rendered).toBe(6);
+    expect(result.sent).toBe(12);
+    // Six photos: comfortably inside Telegram's ten-per-album limit.
+    expect(albumSize).toBe(6);
   });
 });

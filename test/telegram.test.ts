@@ -114,7 +114,7 @@ describe('sendMediaGroup', () => {
     return bytes.buffer;
   };
 
-  it('uploads the album as multipart attachments with plain-text captions', async () => {
+  it('uploads the album as multipart attachments with one plain-text caption', async () => {
     let seenUrl = '';
     let seenForm: FormData | undefined;
     const fetchImpl: typeof fetch = async (input, init) => {
@@ -132,10 +132,8 @@ describe('sendMediaGroup', () => {
     const messages = await sendMediaGroup({
       token: 'T',
       chatId: '@somechannel',
-      media: [
-        { photo: png(), caption: '📰 خبر یک' },
-        { photo: png(), caption: 'خبر دو' },
-      ],
+      media: [{ photo: png() }, { photo: png() }],
+      caption: '📰 خبر یک',
       fetchImpl,
       baseUrl: 'https://api.test',
     });
@@ -147,14 +145,73 @@ describe('sendMediaGroup', () => {
       media: string;
       caption?: string;
     }[];
+    // Exactly ONE caption, on the first photo: that is what makes Telegram
+    // render the group as a single swipeable slideshow.
     expect(media).toEqual([
       { type: 'photo', media: 'attach://card0', caption: '📰 خبر یک' },
-      { type: 'photo', media: 'attach://card1', caption: 'خبر دو' },
+      { type: 'photo', media: 'attach://card1' },
     ]);
     expect(seenForm!.get('card0')).toBeInstanceOf(Blob);
     expect(seenForm!.get('card1')).toBeInstanceOf(Blob);
     // Plain captions only — no parse mode that could be rejected.
     expect(seenForm!.get('parse_mode')).toBeNull();
+  });
+
+  it('never captions more than the first photo, whatever the album size', async () => {
+    let seenForm: FormData | undefined;
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      seenForm = (init as RequestInit).body as FormData;
+      return jsonResponse({
+        ok: true,
+        result: Array.from({ length: 10 }, (_, i) => ({ message_id: i + 1, date: 1 })),
+      });
+    };
+
+    await sendMediaGroup({
+      token: 'T',
+      chatId: '@c',
+      media: Array.from({ length: 10 }, () => ({ photo: png() })),
+      caption: 'عنوان آلبوم',
+      fetchImpl,
+    });
+
+    const media = JSON.parse(String(seenForm!.get('media'))) as { caption?: string }[];
+    expect(media.filter((item) => item.caption !== undefined)).toHaveLength(1);
+    expect(media[0].caption).toBe('عنوان آلبوم');
+  });
+
+  it('omits the caption entirely when it is blank, and clamps a long one', async () => {
+    const forms: FormData[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      forms.push((init as RequestInit).body as FormData);
+      return jsonResponse({
+        ok: true,
+        result: [
+          { message_id: 1, date: 1 },
+          { message_id: 2, date: 1 },
+        ],
+      });
+    };
+
+    await sendMediaGroup({
+      token: 'T',
+      chatId: '@c',
+      media: [{ photo: png() }, { photo: png() }],
+      caption: '   ',
+      fetchImpl,
+    });
+    await sendMediaGroup({
+      token: 'T',
+      chatId: '@c',
+      media: [{ photo: png() }, { photo: png() }],
+      caption: 'x'.repeat(2000),
+      fetchImpl,
+    });
+
+    const blank = JSON.parse(String(forms[0].get('media'))) as { caption?: string }[];
+    expect(blank.every((item) => item.caption === undefined)).toBe(true);
+    const long = JSON.parse(String(forms[1].get('media'))) as { caption?: string }[];
+    expect(long[0].caption).toHaveLength(1024);
   });
 
   it('refuses albums outside the 2–10 item range', async () => {

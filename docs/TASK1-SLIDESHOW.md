@@ -9,17 +9,18 @@ is Task 5. Until then it runs on demand (see "Testing" below).
 
 Once per run (cron `0 */3 * * *` UTC, i.e. 03:30 / 06:30 / 09:30 … Tehran):
 
-1. Picks **at most 10** summarized, non-advertising items that have never been
+1. Picks **at most 12** summarized, non-advertising items that have never been
    sent as a slide (`messages` ⟕ `slideshow_sent`), most important first.
 2. Translates the non-Persian ones to Persian — **one batched LLM call**.
 3. Extracts **2–4 keywords per item** — **one batched LLM call**. A keyword is
    kept only if it occurs *verbatim* in that item's own text.
 4. Resolves each article's `og:image` (one bounded fetch per item).
-5. Renders one **1080×1350 PNG** per item through Browser Run.
-6. Sends **one Telegram album** (`sendMediaGroup`, 2–10 photos, a short caption
-   on each; `sendPhoto` when only one slide survived).
+5. Renders one **1080×1350 PNG** per **pair** of items through Browser Run —
+   two stories share a slide, so twelve news become **six** pictures.
+6. Sends **one Telegram album** (`sendMediaGroup`, 2–6 photos, a **single**
+   date caption on the first photo; `sendPhoto` when only one slide survived).
 7. **Only after Telegram confirms**, writes the items to `slideshow_sent` —
-   together with each slide's `file_id`.
+   both stories of a picture recording that picture's `message_id` / `file_id`.
 8. Optionally archives the PNGs to R2 (`MEDIA`), best effort.
 
 Nothing in that list is allowed to take the run down:
@@ -37,7 +38,7 @@ Nothing in that list is allowed to take the run down:
 
 | Path | Role |
 | --- | --- |
-| `src/slideshow/slideTemplate.ts` | The 1080×1350 HTML: gradient, glass card, `<mark>` highlighting, 4-line clamp, escaping. |
+| `src/slideshow/slideTemplate.ts` | The 1080×1350 HTML: `buildPairSlideHtml()` (two stories per picture) and the solo `buildSlideHtml()`; gradient, glass card, `<mark>` highlighting, line clamps, escaping. |
 | `src/slideshow/fontAssets.ts` | Generated. Vazirmatn 400 + 700 as base64. Rebuild: `npm run build:fonts`. |
 | `src/slideshow/ogImage.ts` | `og:image` / `twitter:image` extraction, head-only, 256 KB cap. |
 | `src/slideshow/enrich.ts` | The two batched LLM calls + verbatim/Persian verification. |
@@ -50,8 +51,7 @@ Nothing in that list is allowed to take the run down:
 
 ## Design details worth knowing
 
-**Fonts are embedded, never fetched.** `src/newsImage.ts` (the existing 4-up
-album) loads Vazirmatn from Google/jsDelivr at render time. The slide template
+**Fonts are embedded, never fetched.** `src/newsImage.ts` (the cron album) loads Vazirmatn from Google/jsDelivr at render time. The slide template
 does not: both weights are inlined as base64 data URLs, so a CDN outage or a
 blocked egress cannot produce a slide in Times New Roman. Cost: ~132 KB of
 base64 per slide HTML. Worker bundle is 480 KiB total (105 KiB gzipped).
@@ -61,12 +61,22 @@ base64 per slide HTML. Worker bundle is 480 KiB total (105 KiB gzipped).
 are applied longest-first and already-marked spans are never re-entered, so no
 nesting and no injection. A keyword the model invented simply never matches.
 
-**The 4-line summary is a hard guarantee**, not a hope: `-webkit-line-clamp: 4`
-plus `overflow: hidden` on a fixed-height flex child. The headline clamps to 3.
-Text is also character-clamped before it reaches the template.
+**The summary clamp is a hard guarantee**, not a hope: `-webkit-line-clamp`
+plus `overflow: hidden` on a fixed-height flex child — 4 lines of summary and 2
+of headline on a paired card, 7 and 3 on a solo one. Text is also
+character-clamped before it reaches the template (110/220 chars per paired
+story).
 
-**Captions carry the counter too** (`۳/۱۰` is on the slide, `3/10` in the
-caption) because Telegram shows only the first caption in some clients.
+**One caption per album — never one per photo.** Telegram renders a media
+group as a single swipeable slideshow (arrows on desktop/web, swiping on
+mobile) only while exactly one item carries a caption. The moment a second
+photo has one, every client falls back to showing the photos as separate
+captioned messages. So `buildAlbumCaption()` returns a single short line —
+`📰 brand — date` and nothing else — and `sendMediaGroup()` attaches it to
+`media[0]` only; the other photos are caption-free by construction. There is no
+headline index in the caption on purpose: **the job ships pictures only**, and
+every headline, summary, category and source is rendered into the slide. The
+per-slide counter also lives *on* the slide (`۳/۶`).
 
 **`/slideshow` costs no renders.** It pages through the *last album already
 posted* using the Telegram `file_id` recorded at send time, via
@@ -76,20 +86,20 @@ R2 reads. Session (message id + ordered file_ids + cursor) lives in KV with a
 
 ## Budgets
 
-Per 10-slide run, against the **Workers Free** caps:
+Per full run (12 news ⇒ 6 slides), against the **Workers Free** caps:
 
 | Resource | Used | Free limit |
 | --- | --- | --- |
-| Subrequests | ≈ 23 (10 article fetches + 10 screenshots + 2 LLM + 1 send) | 50 per invocation |
-| Browser Run | 10 Quick Actions, paced ≥ 10 s apart ⇒ ~100 s wall clock | 1 req / 10 s, 10 min/day |
+| Subrequests | ≈ 21 (12 article fetches + 6 screenshots + 2 LLM + 1 send) | 50 per invocation |
+| Browser Run | 6 Quick Actions, paced ≥ 10 s apart ⇒ ~60 s wall clock | 1 req / 10 s, 10 min/day |
 | LLM calls | 2 | `LLM_DAILY_BUDGET`, default 60/day |
 
-⚠️ **Browser Run free tier is the real constraint.** 8 runs/day × 10 slides is
-~80 screenshots ≈ 6–7 minutes of the 10 min/day free allowance, and that
-allowance is shared with the existing `/testimage` album. If you stay on Free,
-consider `SLIDESHOW_MAX_ITEMS="5"`.
+⚠️ **Browser Run free tier is the real constraint**, though pairing halved it:
+8 runs/day × 6 slides is ~48 screenshots ≈ 4 minutes of the 10 min/day free
+allowance, and that allowance is shared with the `/testimage` album. If you stay
+on Free, consider `SLIDESHOW_MAX_ITEMS="6"` (three pictures).
 
-⚠️ **Free plan CPU is 10 ms per request**; a paced 10-slide run is ~100 s of
+⚠️ **Free plan CPU is 10 ms per request**; a paced 6-slide run is ~60 s of
 *wall* time (mostly waiting, which does not count as CPU), but Browser Run
 minutes and the 30 s/15 min cron CPU ceiling on Paid are the numbers to watch.
 
@@ -103,19 +113,20 @@ minutes and the 30 s/15 min cron CPU ceiling on Paid are the numbers to watch.
 npm run preview:slide      # then open http://localhost:8080
 ```
 
-Three deliberately awkward samples render in your own browser: a very long
-headline, a summary well past the 4-line budget, a missing image, an English
-source name, and overlapping keywords. `/slide/0` shows one slide at exactly
-1080×1350 — the same HTML string Browser Run receives. `/raw/0` dumps the HTML.
+Two deliberately awkward samples render in your own browser — a full picture of
+two stories and the trailing solo one — covering a very long headline, a summary
+well past the line budget, a missing image, an English source name, and
+overlapping keywords. `/slide/0` shows one slide at exactly 1080×1350 — the same
+HTML string Browser Run receives. `/raw/0` dumps the HTML.
 
 Check: Persian letters are *joined* and read right-to-left, the yellow `<mark>`
-highlights sit on real words, the summary never spills out of the card, the
-footer shows `منبع: …`, the brand, and `۳/۱۰`.
+highlights sit on real words, neither summary spills out of its card, the
+footer shows `منبع: …`, the brand, and `۱/۶`.
 
 ### 2. Unit tests
 
 ```bash
-npm test                      # 627 tests, all green
+npm test                      # 762 tests, all green
 npx vitest run test/slideTemplate.test.ts test/slideshow.test.ts
 ```
 
@@ -152,7 +163,9 @@ npx wrangler dev --test-scheduled
 curl "http://localhost:8787/__scheduled?cron=0+*/3+*+*+*"
 ```
 
-Then in a **private chat** with the bot: `/slideshow` → `◀ قبلی | ۳/۱۰ | بعدی ▶`.
+Then in a **private chat** with the bot: `/slideshow` → `◀ قبلی | ۳/۶ | بعدی ▶`
+(rows sharing a `file_id` — the two stories of one picture — are folded back
+into a single browsable slide).
 
 ### 5. Verify the dedupe table
 

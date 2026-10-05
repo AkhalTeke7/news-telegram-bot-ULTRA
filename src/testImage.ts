@@ -22,7 +22,7 @@ import { baleSendPhoto } from './bale';
 import { readMsEnv } from './pipeline';
 import {
   DEFAULT_IMAGE_RENDER_SPACING_MS,
-  buildAlbumCaptions,
+  buildAlbumCaption,
   renderRunAlbum,
   type BrowserBinding,
 } from './newsImage';
@@ -175,19 +175,14 @@ export async function sendTestImage(
     };
   }
 
-  const captions = buildAlbumCaptions(
-    album.slides.map((slide) => slide.items),
-    album.ticker,
-    album.hidden,
-    opts.now ?? new Date()
-  );
+  // ONE short date caption for the whole album: the news lives in the picture,
+  // and a second caption would make Telegram split the slideshow into separate
+  // messages.
+  const albumCaption = buildAlbumCaption(opts.now ?? new Date());
   const bytes = album.slides.reduce((sum, slide) => sum + slide.bytes, 0);
 
   try {
-    const media = album.slides.map((slide, index) => ({
-      photo: slide.png,
-      caption: captions[index],
-    }));
+    const media = album.slides.map((slide) => ({ photo: slide.png }));
     // A media group needs at least two photos; one slide goes as sendPhoto.
     const sent =
       media.length >= 2
@@ -195,6 +190,7 @@ export async function sendTestImage(
             token,
             chatId: destination,
             media,
+            caption: albumCaption,
             // Clearly a diagnostic; subscribers should not be buzzed for it.
             disableNotification: true,
             fetchImpl: opts.fetchImpl,
@@ -204,7 +200,7 @@ export async function sendTestImage(
             token,
             chatId: destination,
             photo: album.slides[0].png,
-            caption: captions[0],
+            caption: albumCaption,
             disableNotification: true,
             fetchImpl: opts.fetchImpl,
             baseUrl: opts.baseUrl,
@@ -218,7 +214,7 @@ export async function sendTestImage(
     });
     // Best-effort Bale mirror of the very same PNGs, so this button also
     // verifies the Bale token + destination. Never affects the Telegram result.
-    const bale = await mirrorTestImageToBale(env, album.slides, captions, opts.fetchImpl);
+    const bale = await mirrorTestImageToBale(env, album.slides, albumCaption, opts.fetchImpl);
     return {
       ok: true,
       messageId: sent.message_id,
@@ -243,11 +239,16 @@ export async function sendTestImage(
   }
 }
 
-/** Mirrors every test slide to Bale; undefined when Bale is not configured. */
+/**
+ * Mirrors every test slide to Bale; undefined when Bale is not configured.
+ *
+ * Bale has no album transport, so the slides go out as separate photos — the
+ * first one carrying the same single caption the Telegram album uses.
+ */
 async function mirrorTestImageToBale(
   env: Env,
   cards: { png: ArrayBuffer }[],
-  captions: string[],
+  caption: string,
   fetchImpl?: typeof fetch
 ): Promise<BaleTestOutcome | undefined> {
   const bale = resolveBaleDelivery(env);
@@ -258,7 +259,7 @@ async function mirrorTestImageToBale(
         token: bale.token,
         chatId: bale.destination,
         photo: card.png,
-        caption: captions[index],
+        ...(index === 0 ? { caption } : {}),
         fetchImpl,
       });
     }

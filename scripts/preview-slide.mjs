@@ -1,10 +1,13 @@
 /**
  * Local design preview for the slideshow template.
  *
- * Renders `buildSlideHtml()` with realistic sample data in your own browser,
- * so Persian shaping, RTL layout, the embedded Vazirmatn font, the <mark>
- * highlighting and the 4-line summary clamp can all be checked WITHOUT
+ * Renders `buildPairSlideHtml()` with realistic sample data in your own
+ * browser, so Persian shaping, RTL layout, the embedded Vazirmatn font, the
+ * <mark> highlighting and the summary clamps can all be checked WITHOUT
  * spending Browser Run minutes or sending anything to Telegram.
+ *
+ * A production slide carries TWO stories; the last slide of a run may carry
+ * one, so both shapes are in the samples below.
  *
  *   npm run preview:slide         # then open http://localhost:8080
  *
@@ -37,20 +40,20 @@ execFileSync(
   { stdio: 'inherit' }
 );
 
-const { buildSlideHtml, SLIDE_WIDTH, SLIDE_HEIGHT } = await import(pathToFileURL(outFile).href);
+const { buildPairSlideHtml, SLIDE_WIDTH, SLIDE_HEIGHT } = await import(
+  pathToFileURL(outFile).href
+);
 
 // Same shape jalaliDateTime() produces: Jalali date + Persian-digit clock.
 const stamp = '۱۳ مهر ۱۴۰۵ — ۱۱:۴۵';
 
 /**
- * Deliberately awkward samples: a very long headline, a summary far past the
- * 4-line budget, a missing image, an English source name, and keywords that
+ * Deliberately awkward stories: a very long headline, a summary far past the
+ * line budget, a missing image, an English source name, and keywords that
  * overlap so the highlighter's longest-first rule gets exercised.
  */
-const SAMPLES = [
+const STORIES = [
   {
-    index: 1,
-    total: 10,
     category: { emoji: '💰', label: 'اقتصاد' },
     headline: 'بانک مرکزی آمریکا نرخ بهره را بدون تغییر نگه داشت و از احتمال کاهش در نشست بعدی خبر داد',
     summary:
@@ -58,12 +61,8 @@ const SAMPLES = [
     keywords: ['فدرال رزرو', 'نرخ بهره', 'جروم پاول', 'طلا'],
     imageUrl: 'https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=1200&q=70',
     sourceName: 'رویترز',
-    brandName: 'اخبار فوری',
-    stamp,
   },
   {
-    index: 2,
-    total: 10,
     category: { emoji: '🛢️', label: 'انرژی' },
     headline: 'اوپک پلاس تولید نفت را افزایش می‌دهد',
     summary:
@@ -71,26 +70,29 @@ const SAMPLES = [
     keywords: ['اوپک پلاس', 'نفت برنت', '۱۳۷ هزار بشکه'],
     imageUrl: null, // -> gradient placeholder + category icon
     sourceName: 'OilPrice.com',
-    brandName: 'اخبار فوری',
-    stamp,
   },
   {
-    index: 3,
-    total: 10,
     category: { emoji: '🌍', label: 'جهان' },
     headline:
       'نشست اضطراری شورای امنیت دربارهٔ تنش‌های منطقه‌ای برگزار شد و نمایندگان خواستار آتش‌بس فوری و بازگشت به میز مذاکره شدند',
     summary:
-      'شورای امنیت سازمان ملل در نشستی اضطراری دربارهٔ تشدید تنش‌ها گفت‌وگو کرد. چند عضو دائم خواستار آتش‌بس فوری شدند. دبیرکل سازمان ملل هشدار داد ادامهٔ درگیری می‌تواند مسیرهای انرژی را مختل کند و بازارهای جهانی را تحت فشار بگذارد. این متن عمداً بلند است تا بریدن خلاصه در چهار خط بررسی شود و مطمئن شویم هیچ‌وقت از کارت بیرون نمی‌زند حتی وقتی خبر طولانی باشد.',
+      'شورای امنیت سازمان ملل در نشستی اضطراری دربارهٔ تشدید تنش‌ها گفت‌وگو کرد. چند عضو دائم خواستار آتش‌بس فوری شدند. دبیرکل سازمان ملل هشدار داد ادامهٔ درگیری می‌تواند مسیرهای انرژی را مختل کند و بازارهای جهانی را تحت فشار بگذارد. این متن عمداً بلند است تا بریدن خلاصه بررسی شود و مطمئن شویم هیچ‌وقت از کارت بیرون نمی‌زند حتی وقتی خبر طولانی باشد.',
     keywords: ['شورای امنیت', 'آتش‌بس'],
     imageUrl: 'https://images.unsplash.com/photo-1526470498-9ae73c665de8?w=1200&q=70',
     sourceName: 'Al Jazeera',
-    brandName: 'اخبار فوری',
-    stamp,
   },
 ];
 
-const html = (n) => buildSlideHtml(SAMPLES[n]);
+/**
+ * A run ships twelve news on six slides. These two samples cover both shapes:
+ * a full slide of two stories and the trailing solo slide.
+ */
+const SAMPLES = [
+  { index: 1, total: 6, stories: [STORIES[0], STORIES[1]], brandName: 'اخبار فوری', stamp },
+  { index: 6, total: 6, stories: [STORIES[2]], brandName: 'اخبار فوری', stamp },
+];
+
+const html = (n) => buildPairSlideHtml(SAMPLES[n]);
 
 const indexPage = `<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <title>پیش‌نمایش اسلاید</title>
@@ -109,7 +111,7 @@ const indexPage = `<!doctype html><html lang="fa" dir="rtl"><head><meta charset=
 <div class="row">
 ${SAMPLES.map(
   (s, i) => `<div class="cell"><div class="frame"><iframe src="/slide/${i}" scrolling="no"></iframe></div>
-  <a href="/slide/${i}">اسلاید ${i + 1} — اندازهٔ واقعی</a></div>`
+  <a href="/slide/${i}">اسلاید ${s.index} از ${s.total} (${s.stories.length} خبر) — اندازهٔ واقعی</a></div>`
 ).join('\n')}
 </div></body></html>`;
 

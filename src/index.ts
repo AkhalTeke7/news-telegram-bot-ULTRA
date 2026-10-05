@@ -25,7 +25,17 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+    // The admin panel is one page with two views. `/hunt` is a REAL url for
+    // the security console, so it can be bookmarked, shared with yourself and
+    // reloaded — the page reads the path on boot and opens that view. Same
+    // document, same session, no second app to deploy.
+    if (
+      request.method === 'GET' &&
+      (url.pathname === '/' ||
+        url.pathname === '/index.html' ||
+        url.pathname === '/hunt' ||
+        url.pathname === '/hunt/')
+    ) {
       return new Response(APP_HTML, { headers: HTML_HEADERS });
     }
 
@@ -45,7 +55,7 @@ export default {
         { id: 103, channelUsername: 'IRIB News', text: 'پیش‌بینی کاهش دما در استان‌های شمالی کشور' },
       ];
       const frame = buildSlideFrame(sample, new Date(), 1, 3, sampleTicker);
-      return new Response(buildImageHtml(frame, 'four'), { headers: HTML_HEADERS });
+      return new Response(buildImageHtml(frame, 'fixed'), { headers: HTML_HEADERS });
     }
 
     if (url.pathname === '/favicon.ico') {

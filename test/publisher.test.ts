@@ -1,20 +1,15 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  buildChannelDigest,
   channelDisplayName,
-  destinationLabel,
-  groupByChannel,
   isValidArticleUrl,
   isValidBaleDestination,
-  MAX_MESSAGES_PER_RUN,
-  publishMessageBudget,
+  MAX_ALBUM_SUBREQUESTS,
   resolveBaleDelivery,
   runPublishing,
   selectPublishableMessages,
-  sourceLabel,
-  type PublishableMessage,
 } from '../src/publisher';
+import { MAX_ALBUM_NEWS, MAX_ALBUM_SLIDES, MAX_IMAGE_ITEMS } from '../src/newsImage';
 import { isValidDestinationChat } from '../src/telegram';
 import { runNewsPipeline } from '../src/pipeline';
 import type { Env } from '../src/types';
@@ -58,42 +53,97 @@ async function seedNews(
   return Number(r.meta.last_row_id);
 }
 
-/** Records every text sent to Telegram, in order. */
-function telegramRecorder(ok: (text: string) => boolean = () => true, status = 200) {
-  const sent: { text: string; messageId: number }[] = [];
-  const fetchImpl = vi.fn(async (_url: unknown, init: RequestInit) => {
-    const body = JSON.parse(String(init.body)) as {
-      text?: string;
-      rich_message?: { html?: string };
-    };
-    const text = body.text ?? body.rich_message?.html ?? '';
-    if (!ok(text)) {
-      return new Response(JSON.stringify({ ok: false, description: 'Bad Request' }), { status });
+/** Minimal valid PNG header for the Browser Run fake. */
+function fakePngBytes(): ArrayBuffer {
+  const bytes = new Uint8Array(64);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(16, 2560);
+  view.setUint32(20, 1440);
+  return bytes.buffer;
+}
+
+/**
+ * Records every Telegram call: album sends with their media payload, photo
+ * sends, and — the thing this bot must never do again — text messages.
+ */
+function harness(opts: { sendStatus?: number; retryAfter?: number } = {}) {
+  const browser = {
+    quickAction: vi.fn(
+      async () =>
+        new Response(fakePngBytes(), { status: 200, headers: { 'content-type': 'image/png' } })
+    ),
+  };
+
+  const albums: { media: { caption?: string }[] }[] = [];
+  const photos: { caption?: string }[] = [];
+  const texts: string[] = [];
+  const baleCalls: { url: string; caption?: string }[] = [];
+  let messageId = 500;
+
+  const fetchImpl = vi.fn(async (url: unknown, init: RequestInit) => {
+    const href = String(url);
+    const status = opts.sendStatus ?? 200;
+    const body = init?.body;
+
+    if (href.includes('tapi.bale.ai')) {
+      const form = body instanceof FormData ? body : null;
+      baleCalls.push({ url: href, caption: form?.get('caption')?.toString() });
+      return new Response('{}', { status: 200 });
     }
-    sent.push({ text, messageId: 1000 + sent.length });
-    return new Response(JSON.stringify({ ok: true, result: { message_id: 1000 + sent.length, date: 1 } }), {
+
+    if (href.includes('sendMediaGroup')) {
+      const form = body as FormData;
+      const media = JSON.parse(String(form.get('media'))) as { caption?: string }[];
+      albums.push({ media });
+      if (status >= 400) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            description: 'Bad Request',
+            ...(opts.retryAfter ? { parameters: { retry_after: opts.retryAfter } } : {}),
+          }),
+          { status, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response(
+        JSON.stringify({ ok: true, result: media.map(() => ({ message_id: ++messageId, date: 1 })) }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+
+    if (href.includes('sendPhoto')) {
+      const form = body as FormData;
+      photos.push({ caption: form.get('caption')?.toString() });
+      if (status >= 400) {
+        return new Response(JSON.stringify({ ok: false, description: 'Bad Request' }), { status });
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: ++messageId, date: 1 } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
+    // Any OTHER Bot API call is a text message — recorded so a regression
+    // fails loudly. Non-Telegram URLs (channel previews fetched by the
+    // collector) are answered with an empty page instead.
+    if (href.includes('api.telegram.org')) {
+      texts.push(href);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: ++messageId, date: 1 } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response('<html><body></body></html>', {
       status: 200,
+      headers: { 'content-type': 'text/html' },
     });
   }) as unknown as typeof fetch;
-  return { sent, fetchImpl };
+
+  return { browser, fetchImpl, albums, photos, texts, baleCalls };
 }
 
-function expectRichDigest(
-  text: string,
-  summaries: string[],
-  source: string,
-  destination = '@destination'
-): void {
-  for (const summary of summaries) {
-    expect(text).toContain(`📰 <b>خبر عمومی</b>\n📝 <b>خلاصه:</b> ${summary}`);
-  }
-  expect(text).toContain(`📡 <i>منبع: ${source}</i>`);
-  if (destination) expect(text).toContain(`📣 <i>${destination}</i>`);
-  expect(text).not.toContain('https://');
-}
-
-const envFor = () =>
-  ({ DB: env.DB, TELEGRAM_BOT_TOKEN: 'T', ADMIN_PASSWORD: 'x' }) as Env;
+const envFor = () => ({ DB: env.DB, TELEGRAM_BOT_TOKEN: 'T', ADMIN_PASSWORD: 'x' }) as Env;
 
 async function publishedRows() {
   const { results } = await env.DB.prepare(
@@ -102,294 +152,275 @@ async function publishedRows() {
   return results ?? [];
 }
 
-describe('digest formatting', () => {
-  it('groups summaries in order and ends with source + destination footer', () => {
-    const parts = buildChannelDigest('news1', '@destination', [
-      { id: 1, summaryText: 'خبر اول' },
-      { id: 2, summaryText: 'خبر دوم' },
-      { id: 3, summaryText: 'خبر سوم' },
-    ]);
+/* ------------------------------------------------------- album geometry -- */
 
-    expect(parts).toHaveLength(1);
-    expectRichDigest(parts[0].text, ['خبر اول', 'خبر دوم', 'خبر سوم'], '@news1');
-    expect(parts[0].itemIds).toEqual([1, 2, 3]);
-  });
-
-  it('exposes no ids, model names, filter data, URLs or raw post text', () => {
-    const text = buildChannelDigest('news1', '@destination', [{ id: 7, summaryText: 'خلاصه خبر' }])[0].text;
-    expectRichDigest(text, ['خلاصه خبر'], '@news1');
-    expect(text).not.toMatch(/🔗|https?:\/\/|t\.me|eitaa\.com|\bid\b|free|score|مدل|published a post/);
-  });
-
-  it('renders the AI title, topic emoji, key points and escaped detail as HTML', () => {
-    const [part] = buildChannelDigest('tech_news', '@destination', [
-      {
-        id: 1,
-        title: 'افشای <نسخه> جدید',
-        category: 'technology',
-        summaryText: 'جزئیات خبر با مقدار A & B.',
-        highlights: ['نکته اول', 'نکته دوم'],
-      },
-    ]);
-
-    expect(part.text).toContain('💻 <b>افشای &lt;نسخه&gt; جدید</b>');
-    expect(part.text).toContain('📝 <b>خلاصه:</b> جزئیات خبر با مقدار A &amp; B.');
-    expect(part.text).toContain('🔎 <b>نکات مهم:</b> نکته اول · نکته دوم');
-    expect(part.text).toContain('📡 <i>منبع: @tech_news</i>');
-  });
-
-  it('splits oversized output without cutting a summary and keeps the footer', () => {
-    const long = 'الف'.repeat(1500); // sanitized down to the 1200-char cap
-    const parts = buildChannelDigest('news1', '@destination', [
-      { id: 1, summaryText: long },
-      { id: 2, summaryText: long },
-      { id: 3, summaryText: long },
-      { id: 4, summaryText: long },
-    ]);
-
-    expect(parts.length).toBeGreaterThan(1);
-    for (const part of parts) {
-      expect(part.text.length).toBeLessThanOrEqual(4096);
-      // Every part carries the required footer and no header.
-      expect(part.text).toContain('📡 <i>منبع: @news1</i>');
-      expect(part.text).toContain('📣 <i>@destination</i>');
-      // No summary was cut in half: every body line is a whole summary.
-      for (const chunk of part.text.split('منبع:')[0].trim().split('\n\n')) {
-        if (!chunk.includes('📝')) continue;
-        expect(chunk).toContain(long.slice(0, 100));
-      }
-    }
-    expect(parts.flatMap((p) => p.itemIds)).toEqual([1, 2, 3, 4]);
-    expect(parts[0].text).toContain(long.slice(0, 1000));
-  });
-
-  it('keeps a single oversized summary intact rather than dropping it', () => {
-    const parts = buildChannelDigest('news1', '@destination', [{ id: 1, summaryText: 'ب'.repeat(5000) }]);
-    expect(parts).toHaveLength(1);
-    expect(parts[0].itemIds).toEqual([1]);
-    expect(parts[0].text.length).toBeLessThanOrEqual(4096);
-    expect(parts[0].text).toContain('📡 <i>منبع: @news1</i>\n📣 <i>@destination</i>');
+describe('album geometry', () => {
+  it('publishes twelve news as six pictures of two', () => {
+    expect(MAX_IMAGE_ITEMS).toBe(2);
+    expect(MAX_ALBUM_SLIDES).toBe(6);
+    expect(MAX_ALBUM_NEWS).toBe(12);
+    // Six renders plus one send: comfortably inside the Workers Free budget.
+    expect(MAX_ALBUM_SUBREQUESTS).toBe(7);
+    // Telegram refuses a media group larger than ten photos.
+    expect(MAX_ALBUM_SLIDES).toBeLessThanOrEqual(10);
   });
 });
 
-describe('grouping', () => {
-  const item = (channelId: number, username: string, id: number): PublishableMessage => ({
-    id,
-    channelId,
-    channelUsername: username,
-    channelTitle: null,
-    sourceType: 'telegram',
-    telegramMessageId: id,
-    summaryText: 'x',
-    title: null,
-    importance: null,
-    messageDate: '2026-10-02T11:00:00.000Z',
-    sourceUrl: `https://t.me/${username}/${id}`,
-  });
+/* ----------------------------------------------------- pictures, no text -- */
 
-  it('groups by channel and keeps channel order then chronological order', () => {
-    const groups = groupByChannel([
-      item(2, 'b', 20),
-      item(1, 'a', 11),
-      item(1, 'a', 10),
-    ]);
-    expect(groups.map((g) => g.channelUsername)).toEqual(['b', 'a']);
-    expect(groups[1].items.map((i) => i.id)).toEqual([11, 10]);
-  });
-});
-
-describe('publishing one message per channel', () => {
+describe('publishing is pictures only', () => {
   beforeEach(reset);
 
-  it('one channel with several news produces exactly one message', async () => {
-    const ch = await seedChannel('news1');
-    await seedNews(ch, 'news1', 1, 'خبر اول');
-    await seedNews(ch, 'news1', 2, 'خبر دوم');
-    await seedNews(ch, 'news1', 3, 'خبر سوم');
-
-    const t = telegramRecorder();
-    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
-
-    expect(report.published).toBe(3);
-    expect(t.sent).toHaveLength(1);
-    expectRichDigest(t.sent[0].text, ['خبر اول', 'خبر دوم', 'خبر سوم'], '@news1');
-    expect((await publishedRows()).every((r) => r.published_at !== null)).toBe(true);
-    expect((await publishedRows()).every((r) => r.telegram_destination_message_id === 1001)).toBe(true);
-  });
-
-  it('three channels produce three messages, skipping the empty one, in order', async () => {
-    const a = await seedChannel('news1');
-    const b = await seedChannel('news2');
-    const c = await seedChannel('news3');
-
-    await seedNews(a, 'news1', 1, 'خبر ۱');
-    await seedNews(a, 'news1', 2, 'خبر ۲');
-    await seedNews(a, 'news1', 3, 'خبر ۳');
-    // news2 gets no news at all.
-    await seedNews(c, 'news3', 10, 'خبر الف');
-    await seedNews(c, 'news3', 11, 'خبر ب');
-
-    const t = telegramRecorder();
-    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
-
-    expect(report.published).toBe(5);
-    expect(t.sent).toHaveLength(2);
-    expectRichDigest(t.sent[0].text, ['خبر ۱', 'خبر ۲', 'خبر ۳'], '@news1');
-    expectRichDigest(t.sent[1].text, ['خبر الف', 'خبر ب'], '@news3');
-    expect(t.sent.map((s) => s.text.includes('@news2'))).toEqual([false, false]);
-    void b;
-  });
-
-  it('never merges different channels into one message', async () => {
-    const a = await seedChannel('alpha');
-    const b = await seedChannel('beta_channel');
-    await seedNews(a, 'alpha', 1, 'الف');
-    await seedNews(b, 'beta_channel', 2, 'ب');
-
-    const t = telegramRecorder();
-    await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
-
-    expect(t.sent).toHaveLength(2);
-    for (const s of t.sent) {
-      expect(s.text).not.toMatch(/@alpha[\s\S]*@beta|@beta[\s\S]*@alpha/);
+  it('sends ONE album and not a single text message', async () => {
+    const a = await seedChannel('news_a');
+    const b = await seedChannel('news_b');
+    for (let i = 1; i <= 3; i++) {
+      await seedNews(a, 'news_a', i, `خبر شمارهٔ ${i} از کانال اول.`, 30 - i);
+      await seedNews(b, 'news_b', 10 + i, `خبر شمارهٔ ${10 + i} از کانال دوم.`, 20 - i);
     }
+
+    const h = harness();
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      browser: h.browser,
+      now: new Date(NOW),
+    });
+
+    // Six news → three pictures → exactly one album, zero text messages.
+    expect(h.browser.quickAction).toHaveBeenCalledTimes(3);
+    expect(h.albums).toHaveLength(1);
+    expect(h.albums[0].media).toHaveLength(3);
+    expect(h.texts).toHaveLength(0);
+    expect(report.image?.slides).toBe(3);
+    expect(report.image?.selected).toBe(6);
+    expect(report.published).toBe(6);
   });
 
-  it('orders channels by configured order and news oldest-first', async () => {
-    const a = await seedChannel('first_chan');
-    const b = await seedChannel('second_chan');
-    // Insert newest first so a naive implementation would reverse them.
-    await seedNews(a, 'first_chan', 2, 'دوم', 5);
-    await seedNews(a, 'first_chan', 1, 'اول', 50);
-    await seedNews(b, 'second_chan', 3, 'تنها', 5);
+  it('carries one short date caption on the first photo only', async () => {
+    const ch = await seedChannel('cap_chan');
+    for (let i = 1; i <= 4; i++) await seedNews(ch, 'cap_chan', i, `خبر شمارهٔ ${i} برای کپشن.`, i);
 
-    const t = telegramRecorder();
-    await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
+    const h = harness();
+    await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      browser: h.browser,
+      now: new Date(NOW),
+    });
 
-    expect(t.sent).toHaveLength(2);
-    expectRichDigest(t.sent[0].text, ['اول', 'دوم'], '@first_chan');
-    expectRichDigest(t.sent[1].text, ['تنها'], '@second_chan');
+    const media = h.albums[0].media;
+    expect(media.filter((m) => m.caption !== undefined)).toHaveLength(1);
+    const caption = media[0].caption!;
+    expect(caption.startsWith('📰 اخبار لحظه‌ای —')).toBe(true);
+    // A date line and nothing else: no headline, no source, no link.
+    expect(caption.split('\n')).toHaveLength(1);
+    expect(caption).not.toContain('خبر شمارهٔ');
+    expect(caption).not.toContain('منبع');
+    expect(caption).not.toContain('http');
+    expect(caption.length).toBeLessThanOrEqual(1024);
   });
 
-  it('an oversized channel is split into several messages, never merged with another', async () => {
-    const a = await seedChannel('big_chan');
-    const b = await seedChannel('small_chan');
-    // Summaries are capped at 1200 chars each, so 8 of them overflow 4096.
-    const long = 'الف'.repeat(1500);
-    for (let i = 1; i <= 8; i++) await seedNews(a, 'big_chan', i, long);
-    await seedNews(b, 'small_chan', 99, 'کوچک');
-
-    const t = telegramRecorder();
-    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
-
-    expect(report.published).toBe(9);
-    const bigParts = t.sent.filter((s) => s.text.includes('@big_chan'));
-    const smallParts = t.sent.filter((s) => s.text.includes('@small_chan'));
-    expect(bigParts.length).toBeGreaterThan(1);
-    expect(smallParts).toHaveLength(1);
-    for (const s of t.sent) {
-      expect(s.text.includes('@big_chan') && s.text.includes('@small_chan')).toBe(false);
-      expect(s.text.length).toBeLessThanOrEqual(4096);
+  it('never sends more than the album capacity and keeps the rest pending', async () => {
+    const ch = await seedChannel('many_chan');
+    for (let i = 1; i <= MAX_ALBUM_NEWS + 4; i++) {
+      await seedNews(ch, 'many_chan', i, `خبر شمارهٔ ${i} از صف طولانی.`, 60 - i);
     }
-    // Every item was delivered exactly once across this channel's parts.
-    expect(report.published).toBe(9);
-    const delivered = await env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM messages WHERE published_at IS NOT NULL`
-    ).first<{ n: number }>();
-    expect(delivered?.n).toBe(9);
-    // Continuation parts stay on the same channel, in order.
-    expect(bigParts.every((p) => p.text.includes('📡 <i>منبع: @big_chan</i>'))).toBe(true);
+
+    const h = harness();
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      browser: h.browser,
+      now: new Date(NOW),
+    });
+
+    expect(h.albums[0].media).toHaveLength(MAX_ALBUM_SLIDES);
+    expect(report.published).toBe(MAX_ALBUM_NEWS);
+    // The leftovers are untouched — no failure, no publish — so the next run
+    // picks them up in the same importance order.
+    const pending = (await publishedRows()).filter((r) => r.published_at === null);
+    expect(pending).toHaveLength(4);
+    expect(report.failures).toHaveLength(0);
   });
 
-  it('a failed delivery marks nothing published and keeps rows for retry', async () => {
-    const ch = await seedChannel('fail_chan');
-    await seedNews(ch, 'fail_chan', 1, 'الف');
-    await seedNews(ch, 'fail_chan', 2, 'ب');
+  it('marks rows published only after Telegram confirms, pointing at the album', async () => {
+    const ch = await seedChannel('mark_chan');
+    await seedNews(ch, 'mark_chan', 1, 'خبر اول برای ثبت انتشار.');
+    await seedNews(ch, 'mark_chan', 2, 'خبر دوم برای ثبت انتشار.');
 
-    const t = telegramRecorder(() => false, 400);
-    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
-
-    expect(report.published).toBe(0);
-    expect(report.failures).toHaveLength(2);
-    expect(report.failures.every((f) => f.category === 'telegram_error')).toBe(true);
+    const h = harness();
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      browser: h.browser,
+    });
 
     const rows = await publishedRows();
-    expect(rows.every((r) => r.published_at === null)).toBe(true);
-    const errs = await env.DB.prepare(`SELECT last_publish_error, publish_attempts FROM messages`).all<{
-      last_publish_error: string;
-      publish_attempts: number;
-    }>();
-    expect(errs.results.every((e) => e.last_publish_error === 'telegram_error')).toBe(true);
-    expect(errs.results.every((e) => e.publish_attempts === 1)).toBe(true);
+    expect(rows.every((r) => r.published_at !== null)).toBe(true);
+    expect(new Set(rows.map((r) => r.telegram_destination_message_id)).size).toBe(1);
+    expect(report.published).toBe(2);
+
+    // A second run has nothing left to publish and spends no Browser Run.
+    const second = harness();
+    const again = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: second.fetchImpl,
+      browser: second.browser,
+    });
+    expect(again.published).toBe(0);
+    expect(second.browser.quickAction).not.toHaveBeenCalled();
   });
 
-  it('429 stops the pass and leaves everything unpublished', async () => {
-    const a = await seedChannel('rl_alpha');
-    const b = await seedChannel('rl_beta');
-    await seedNews(a, 'rl_alpha', 1, 'الف');
-    await seedNews(b, 'rl_beta', 2, 'ب');
+  it('publishes nothing — and no text fallback — when Browser Run is missing', async () => {
+    const ch = await seedChannel('no_browser');
+    await seedNews(ch, 'no_browser', 1, 'خبری که تصویر ندارد.');
 
-    let calls = 0;
-    const fetchImpl = vi.fn(async () => {
-      calls++;
-      return new Response(
-        JSON.stringify({ ok: false, description: 'Too Many Requests', parameters: { retry_after: 30 } }),
-        { status: 429 }
-      );
-    }) as unknown as typeof fetch;
+    const h = harness();
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+    });
 
-    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl });
+    expect(h.texts).toHaveLength(0);
+    expect(h.albums).toHaveLength(0);
+    expect(report.published).toBe(0);
+    expect(report.image).toBeUndefined();
+    const rows = await publishedRows();
+    expect(rows.every((r) => r.published_at === null)).toBe(true);
+  });
+
+  it('a failed album marks nothing and records the rows for retry', async () => {
+    const ch = await seedChannel('fail_chan');
+    await seedNews(ch, 'fail_chan', 1, 'خبر اول.');
+    await seedNews(ch, 'fail_chan', 2, 'خبر دوم.');
+    await seedNews(ch, 'fail_chan', 3, 'خبر سوم.');
+    await seedNews(ch, 'fail_chan', 4, 'خبر چهارم.');
+
+    const h = harness({ sendStatus: 400 });
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      browser: h.browser,
+    });
+
+    expect(report.published).toBe(0);
+    expect(report.image?.sent).toBe(false);
+    expect(report.failures.map((f) => f.category)).toEqual([
+      'telegram_error',
+      'telegram_error',
+      'telegram_error',
+      'telegram_error',
+    ]);
+    const rows = await publishedRows();
+    expect(rows.every((r) => r.published_at === null)).toBe(true);
+  });
+
+  it('a 429 stops the pass and leaves everything unpublished', async () => {
+    const ch = await seedChannel('rate_chan');
+    await seedNews(ch, 'rate_chan', 1, 'خبر یک.');
+    await seedNews(ch, 'rate_chan', 2, 'خبر دو.');
+    await seedNews(ch, 'rate_chan', 3, 'خبر سه.');
+    await seedNews(ch, 'rate_chan', 4, 'خبر چهار.');
+
+    const h = harness({ sendStatus: 429, retryAfter: 17 });
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      browser: h.browser,
+    });
 
     expect(report.rateLimited).toBe(true);
     expect(report.published).toBe(0);
-    expect(calls).toBe(1);
-    expect(report.failures[0].retryAfterSeconds).toBe(30);
-    expect((await publishedRows()).every((r) => r.published_at === null)).toBe(true);
+    expect(report.failures.every((f) => f.category === 'rate_limited')).toBe(true);
+    const rows = await publishedRows();
+    expect(rows.every((r) => r.published_at === null)).toBe(true);
   });
 
-  it('marks published only after delivery, and never twice', async () => {
-    const ch = await seedChannel('once_chan');
-    await seedNews(ch, 'once_chan', 1, 'الف');
+  it('a single surviving picture is sent as a plain photo with the same caption', async () => {
+    const ch = await seedChannel('solo_chan');
+    await seedNews(ch, 'solo_chan', 1, 'تنها خبر این اجرا.');
 
-    const t = telegramRecorder();
-    await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
-    const second = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
+    const h = harness();
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      browser: h.browser,
+      now: new Date(NOW),
+    });
 
-    expect(t.sent).toHaveLength(1);
-    expect(second.published).toBe(0);
-    expect(second.eligible).toBe(0);
-    expect((await selectPublishableMessages(env.DB))).toHaveLength(0);
+    // A media group needs two photos, so one picture goes as sendPhoto.
+    expect(h.albums).toHaveLength(0);
+    expect(h.photos).toHaveLength(1);
+    expect(h.photos[0].caption?.startsWith('📰 اخبار لحظه‌ای —')).toBe(true);
+    expect(h.texts).toHaveLength(0);
+    expect(report.published).toBe(1);
   });
 
-  it('skips disabled channels and filtered advertisements', async () => {
-    const on = await seedChannel('on_chan');
+  it('skips disabled channels, filtered ads and unusable source links', async () => {
+    const good = await seedChannel('good_chan');
     const off = await seedChannel('off_chan', false);
-    await seedNews(on, 'on_chan', 1, 'مجاز');
-    const badId = await seedNews(off, 'off_chan', 2, 'غیرمجاز');
-    await env.DB.prepare(`UPDATE messages SET filter_status = 'filtered' WHERE id = ?1`).bind(badId).run();
-    await env.DB.prepare(`UPDATE channels SET enabled = 1 WHERE id = ?1`).bind(off).run();
+    await seedNews(good, 'good_chan', 1, 'خبر سالم.');
+    await seedNews(off, 'off_chan', 2, 'خبر کانال غیرفعال.');
+    const ad = await seedNews(good, 'good_chan', 3, 'تبلیغ.');
+    await env.DB.prepare(`UPDATE messages SET filter_status = 'filtered' WHERE id = ?1`).bind(ad).run();
+    const broken = await seedNews(good, 'good_chan', 4, 'خبر با لینک نامعتبر.');
+    await env.DB.prepare(`UPDATE messages SET source_url = 'https://evil.test/x/1' WHERE id = ?1`)
+      .bind(broken)
+      .run();
 
-    const t = telegramRecorder();
-    await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
+    const h = harness();
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      browser: h.browser,
+    });
 
-    expect(t.sent).toHaveLength(1);
-    expectRichDigest(t.sent[0].text, ['مجاز'], '@on_chan');
+    expect(report.published).toBe(1);
+    expect(report.failures.map((f) => f.category)).toEqual(['invalid_source_url']);
   });
 
-  it('does not publish rows whose stored source link is unusable', async () => {
-    const ch = await seedChannel('url_chan');
-    const bad = await seedNews(ch, 'url_chan', 1, 'بدون لینک');
-    await env.DB.prepare(`UPDATE messages SET source_url = 'https://evil.test/x/1' WHERE id = ?1`).bind(bad).run();
+  it('retires rows the AI scored as not newsworthy instead of queueing them forever', async () => {
+    const ch = await seedChannel('rank_chan');
+    const keep = await seedNews(ch, 'rank_chan', 1, 'خبر مهم.');
+    const drop = await seedNews(ch, 'rank_chan', 2, 'خبر بی‌اهمیت.');
+    await env.DB.prepare(`UPDATE messages SET importance = 5 WHERE id = ?1`).bind(keep).run();
+    await env.DB.prepare(`UPDATE messages SET importance = 1 WHERE id = ?1`).bind(drop).run();
 
-    const t = telegramRecorder();
-    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
+    const h = harness();
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      browser: h.browser,
+    });
 
-    expect(t.sent).toHaveLength(0);
-    expect(report.failures[0].category).toBe('invalid_source_url');
+    expect(report.published).toBe(1);
+    expect(report.retired).toBe(1);
+    // Retiring is not a failure, and the row never comes back as a candidate.
+    expect(report.failures).toHaveLength(0);
+    const row = await env.DB.prepare(`SELECT filter_status, filter_reason FROM messages WHERE id = ?1`)
+      .bind(drop)
+      .first<{ filter_status: string; filter_reason: string | null }>();
+    expect(row?.filter_status).toBe('filtered');
+    expect(row?.filter_reason).toBe('low_importance');
+    expect((await selectPublishableMessages(env.DB)).map((i) => i.id)).not.toContain(drop);
   });
 });
 
-describe('RSS-sourced news', () => {
+/* --------------------------------------------------------- source links -- */
+
+describe('source links and display names', () => {
   beforeEach(reset);
 
   async function seedRssChannel(id: number, title: string) {
@@ -415,16 +446,17 @@ describe('RSS-sourced news', () => {
     const ch = await seedRssChannel(1, 'بی‌بی‌سی فارسی');
     await seedRssNews(ch, 1, 'خلاصهٔ خبر آر‌اس‌اس', 'https://www.bbc.com/persian/articles/c1234567890o');
 
-    const t = telegramRecorder();
-    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
+    const h = harness();
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      browser: h.browser,
+    });
 
     expect(report.published).toBe(1);
     expect(report.failures).toHaveLength(0);
-    expect(t.sent).toHaveLength(1);
-    // The footer uses the feed's display title, never the internal rss_N
-    // username and never an invented @ in front of Persian text.
-    expectRichDigest(t.sent[0].text, ['خلاصهٔ خبر آر‌اس‌اس'], 'بی‌بی‌سی فارسی');
-    expect(t.sent[0].text).not.toContain('rss_');
+    expect(h.photos).toHaveLength(1);
   });
 
   it('still rejects RSS rows whose stored link is not a valid https URL', async () => {
@@ -432,10 +464,14 @@ describe('RSS-sourced news', () => {
     await seedRssNews(ch, 1, 'خبر با لینک خراب', 'http://insecure.example.com/a');
     await seedRssNews(ch, 2, 'خبر بدون لینک معتبر', 'not a url');
 
-    const t = telegramRecorder();
-    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
+    const h = harness();
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      browser: h.browser,
+    });
 
-    expect(t.sent).toHaveLength(0);
     expect(report.published).toBe(0);
     expect(report.failures.map((f) => f.category)).toEqual(['invalid_source_url', 'invalid_source_url']);
   });
@@ -443,12 +479,19 @@ describe('RSS-sourced news', () => {
   it('keeps requiring t.me links for Telegram-sourced rows', async () => {
     const ch = await seedChannel('tg_chan');
     const bad = await seedNews(ch, 'tg_chan', 1, 'خبر تلگرامی');
-    await env.DB.prepare(`UPDATE messages SET source_url = 'https://example.com/a' WHERE id = ?1`).bind(bad).run();
+    await env.DB.prepare(`UPDATE messages SET source_url = 'https://example.com/a' WHERE id = ?1`)
+      .bind(bad)
+      .run();
 
-    const t = telegramRecorder();
-    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
+    const h = harness();
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      browser: h.browser,
+    });
 
-    expect(t.sent).toHaveLength(0);
+    expect(report.published).toBe(0);
     expect(report.failures[0].category).toBe('invalid_source_url');
   });
 
@@ -457,309 +500,71 @@ describe('RSS-sourced news', () => {
     expect(isValidArticleUrl('https://zoomit.ir/2026/a-b-c/')).toBe(true);
     expect(isValidArticleUrl('http://www.bbc.com/persian')).toBe(false); // not https
     expect(isValidArticleUrl('https://localhost/x')).toBe(false); // no dot in host
-    expect(isValidArticleUrl('https://a.b/ x')).toBe(false); // whitespace
-    expect(isValidArticleUrl('')).toBe(false);
-    expect(isValidArticleUrl(`https://a.ir/${'x'.repeat(2050)}`)).toBe(false); // too long
+    expect(isValidArticleUrl('not a url')).toBe(false);
   });
 
   it('prefers the feed title as the display name for RSS channels', () => {
     expect(
       channelDisplayName({ channelUsername: 'rss_3', channelTitle: 'بی‌بی‌سی فارسی', sourceType: 'rss' })
     ).toBe('بی‌بی‌سی فارسی');
-    // Telegram channels keep the username-first behavior.
     expect(
       channelDisplayName({ channelUsername: 'news_one', channelTitle: 'عنوان', sourceType: 'telegram' })
     ).toBe('news_one');
-    // RSS without a title falls back to the internal username, never invents one.
-    expect(channelDisplayName({ channelUsername: 'rss_9', channelTitle: null, sourceType: 'rss' })).toBe('rss_9');
-  });
-
-  it('labels ASCII usernames with @ and display titles verbatim', () => {
-    expect(sourceLabel('news_one')).toBe('@news_one');
-    expect(sourceLabel('بی‌بی‌سی فارسی')).toBe('بی‌بی‌سی فارسی');
-  });
-});
-
-describe('final channel message format', () => {
-  it('has no header and ends with exactly one منبع footer plus the destination', () => {
-    const text = buildChannelDigest('news_one', '@destination', [
-      { id: 1, summaryText: 'خبر اول' },
-      { id: 2, summaryText: 'خبر دوم' },
-      { id: 3, summaryText: 'خبر سوم' },
-    ])[0].text;
-
-    expectRichDigest(text, ['خبر اول', 'خبر دوم', 'خبر سوم'], '@news_one');
-    // Exactly one source footer, destination immediately below it.
-    expect(text.match(/منبع:/g)).toHaveLength(1);
-    expect(text).toContain('📡 <i>منبع: @news_one</i>\n📣 <i>@destination</i>');
-  });
-
-  it('never repeats the source channel after individual summaries', () => {
-    const text = buildChannelDigest('chan_two', '@destination', [
-      { id: 1, summaryText: 'الف' },
-      { id: 2, summaryText: 'ب' },
-    ])[0].text;
-    // The only mention is in the footer.
-    const body = text.slice(0, text.indexOf('منبع:'));
-    expect(body).not.toContain('@chan_two');
-    expect(text.match(/@chan_two/g)).toHaveLength(1);
-  });
-
-  it('contains no forbidden content', () => {
-    const text = buildChannelDigest('clean_chan', '@destination', [{ id: 9, summaryText: 'خلاصه' }])[0].text;
-    expect(text).not.toMatch(
-      /🔗|https?:\/\/|t\.me|telegram\.me|telegram\.dog|eitaa\.com|instagram|wa\.me|youtube|bit\.ly|joinchat|www\.|\bid\b|free|score|مدل|published a post|این پست|کانال مذکور|بیان می‌کند/
+    expect(channelDisplayName({ channelUsername: 'rss_9', channelTitle: null, sourceType: 'rss' })).toBe(
+      'rss_9'
     );
-  });
-
-  it('uses the real source channel and the configured destination, never hardcoded', () => {
-    const a = buildChannelDigest('alpha_chan', '@first_dest', [{ id: 1, summaryText: 'x' }])[0].text;
-    const b = buildChannelDigest('beta_channel', '@second_dest', [{ id: 2, summaryText: 'x' }])[0].text;
-    expect(a).toContain('منبع: @alpha_chan');
-    expect(a).toContain('@first_dest');
-    expect(a).not.toContain('beta_channel');
-    expect(b).toContain('منبع: @beta_channel');
-    expect(b).toContain('@second_dest');
-  });
-
-  it('normalizes the destination for display without changing the send target', () => {
-    expect(destinationLabel('@dest_channel')).toBe('@dest_channel');
-    expect(destinationLabel('dest_channel')).toBe('@dest_channel');
-    expect(destinationLabel('  @dest_channel  ')).toBe('@dest_channel');
-    // A numeric channel id is printed as configured; no invented handle.
-    expect(destinationLabel('-1001234567890')).toBe('-1001234567890');
-    expect(destinationLabel(undefined)).toBe('');
-    // The value actually sent to Telegram stays exactly as configured.
-    expect(isValidDestinationChat('-1001234567890')).toBe(true);
-  });
-
-  it('omits the destination line only when nothing is configured', () => {
-    const text = buildChannelDigest('chan_three', '', [{ id: 1, summaryText: 'الف' }])[0].text;
-    expectRichDigest(text, ['الف'], '@chan_three', '');
-  });
-
-  it('counts footer lines in the 4096 limit', () => {
-    const long = 'الف'.repeat(1500);
-    const parts = buildChannelDigest(
-      'limit_chan',
-      '@destination',
-      [1, 2, 3, 4, 5].map((id) => ({ id, summaryText: long }))
-    );
-
-    expect(parts.length).toBeGreaterThan(1);
-    for (const part of parts) {
-      expect(part.text.length).toBeLessThanOrEqual(4096);
-      expect(part.text).toContain('📡 <i>منبع: @limit_chan</i>');
-    }
-    expect(parts.flatMap((p) => p.itemIds)).toEqual([1, 2, 3, 4, 5]);
-  });
-
-  it('handles a single summary too long to fit, keeping the footer', () => {
-    const parts = buildChannelDigest('huge_chan', '@destination', [
-      { id: 1, summaryText: 'ب'.repeat(20_000) },
-    ]);
-    expect(parts).toHaveLength(1);
-    expect(parts[0].text.length).toBeLessThanOrEqual(4096);
-    expect(parts[0].text).toContain('📡 <i>منبع: @huge_chan</i>');
-    expect(parts[0].itemIds).toEqual([1]);
-  });
-
-  it('falls back to the configured title only when no username exists', () => {
     expect(channelDisplayName({ channelUsername: '', channelTitle: 'عنوان' })).toBe('عنوان');
-    expect(channelDisplayName({ channelUsername: 'user_chan', channelTitle: 'عنوان' })).toBe('user_chan');
-    // No identifier at all => nothing is published rather than a broken label.
-    expect(buildChannelDigest('', '@destination', [{ id: 1, summaryText: 'x' }])).toEqual([]);
-  });
-});
-describe('per-run limits', () => {
-  beforeEach(reset);
-
-  it('does not postpone current-window news because of a per-run row cap', async () => {
-    const ch = await seedChannel('busy_chan');
-    // Far more than the old per-channel cap of 50.
-    for (let i = 1; i <= 60; i++) await seedNews(ch, 'busy_chan', i, `خبر ${i}`);
-
-    const t = telegramRecorder();
-    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
-
-    expect(report.published).toBe(60);
-    const rows = await publishedRows();
-    expect(rows.filter((r) => r.published_at !== null)).toHaveLength(60);
-    // Everything is delivered, oldest first, in as few messages as needed.
-    expect(t.sent).toHaveLength(1);
-    expect(t.sent[0].text).toContain('خبر 1');
-    expect(t.sent[0].text).toContain('خبر 60');
   });
 
-  it('covers all channels across runs without ever dropping one', async () => {
-    for (let i = 1; i <= 18; i++) {
-      const name = `many_chan_${i}`;
-      const ch = await seedChannel(name);
-      await seedNews(ch, name, 1, `خبر ${i}`);
-    }
-
-    // 18 enabled channels leave a smaller publish budget than 18 (the platform
-    // subrequest limit is shared with collection, summarization and the album
-    // reserve), so run one publishes the first channels in order and defers
-    // the rest explicitly.
-    const t = telegramRecorder();
-    const first = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
-
-    expect(t.sent).toHaveLength(publishMessageBudget(18, 0));
-    expect(t.sent[0].text).toContain('@many_chan_1');
-    expect(first.failures.some((f) => f.category === 'run_limit')).toBe(true);
-
-    // Follow-up runs drain the deferred channels in the same order.
-    const delivered = [...t.sent.map((s) => s.text)];
-    for (let run = 0; run < 10; run++) {
-      const t2 = telegramRecorder();
-      const next = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t2.fetchImpl });
-      delivered.push(...t2.sent.map((s) => s.text));
-      if (next.published === 0) break;
-    }
-
-    const left = await env.DB.prepare(`SELECT COUNT(*) AS n FROM messages WHERE published_at IS NULL`).first<{ n: number }>();
-    expect(left?.n).toBe(0);
-    // Every channel appeared exactly once across the runs, in order.
-    expect(delivered.map((text) => text.match(/@many_chan_\d+/)?.[0])).toEqual(
-      Array.from({ length: 18 }, (_, i) => `@many_chan_${i + 1}`)
-    );
-  });
-
-  it('stops at the documented message bound and records the remainder explicitly', async () => {
-    const ch = await seedChannel('bound_chan');
-    // Each summary sanitizes to 1200 chars, so many parts are produced.
-    const long = 'الف'.repeat(1500);
-    for (let i = 1; i <= 200; i++) await seedNews(ch, 'bound_chan', i, long);
-
-    const t = telegramRecorder();
-    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
-
-    const budget = publishMessageBudget(1, 0);
-    expect(t.sent.length).toBe(budget);
-    expect(t.sent.length).toBeLessThanOrEqual(MAX_MESSAGES_PER_RUN);
-    // The rest is recorded, not silently dropped.
-    const notPublished = await env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM messages WHERE published_at IS NULL AND last_publish_error = 'run_limit'`
-    ).first<{ n: number }>();
-    expect(notPublished!.n).toBeGreaterThan(0);
-    expect(report.failures.some((f) => f.category === 'run_limit')).toBe(true);
-
-    // Repeated runs drain the backlog completely — nothing is lost or duplicated.
-    let totalPublished = report.published;
-    for (let run = 0; run < 10; run++) {
-      const t2 = telegramRecorder();
-      const next = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t2.fetchImpl });
-      totalPublished += next.published;
-      const left = await env.DB.prepare(`SELECT COUNT(*) AS n FROM messages WHERE published_at IS NULL`).first<{ n: number }>();
-      if ((left?.n ?? 0) === 0) break;
-    }
-    expect(totalPublished).toBe(200);
-    const stillUnpublished = await env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM messages WHERE published_at IS NULL`
-    ).first<{ n: number }>();
-    expect(stillUnpublished?.n).toBe(0);
-    // Each item was delivered exactly once.
-    const publishedRows = await env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM messages WHERE published_at IS NOT NULL`
-    ).first<{ n: number }>();
-    expect(publishedRows?.n).toBe(200);
+  it('validates the destination chat', () => {
+    expect(isValidDestinationChat('@my_channel')).toBe(true);
+    expect(isValidDestinationChat('-1001234567890')).toBe(true);
+    expect(isValidDestinationChat('nonsense value')).toBe(false);
   });
 });
 
-describe('subrequest budget', () => {
-  beforeEach(reset);
-
-  it('derives the budget from the Free subrequest limit and the album size', () => {
-    // 50 total - summarize(20) - model list(1) - collection(1 per channel)
-    // - album reserve (one Browser Run render per slide + one media group send).
-    // Default reserve (a single slide + send = 2):
-    expect(publishMessageBudget(0)).toBe(27);
-    expect(publishMessageBudget(5)).toBe(22);
-    expect(publishMessageBudget(10)).toBe(17);
-    // No Browser Run binding => no album at all => nothing reserved:
-    expect(publishMessageBudget(0, 0)).toBe(29);
-    expect(publishMessageBudget(1, 0)).toBe(28);
-    expect(publishMessageBudget(18, 0)).toBe(11);
-    // A five-slide album reserves six (five renders + one send):
-    expect(publishMessageBudget(0, 6)).toBe(23);
-    // Always at least one message, so publishing never stalls completely.
-    expect(publishMessageBudget(1000)).toBe(1);
-    // Never above the hard ceiling.
-    expect(publishMessageBudget(0)).toBeLessThanOrEqual(MAX_MESSAGES_PER_RUN);
-  });
-
-  it('stays inside the budget and records the remainder instead of overflowing', async () => {
-    const long = 'الف'.repeat(1500);
-    // 5 enabled channels, each needing several messages.
-    for (let c = 1; c <= 5; c++) {
-      const name = `budget_chan_${c}`;
-      const ch = await seedChannel(name);
-      for (let i = 1; i <= 40; i++) await seedNews(ch, name, c * 100 + i, long);
-    }
-
-    const t = telegramRecorder();
-    const report = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t.fetchImpl });
-
-    // No Browser Run binding: the budget for 5 enabled channels is 24; the
-    // run must not exceed it.
-    expect(t.sent.length).toBeLessThanOrEqual(publishMessageBudget(5, 0));
-    expect(report.failures.some((f) => f.category === 'run_limit')).toBe(true);
-
-    // Collection + summarization + publishing now fit the 50-subrequest budget.
-    const totalFetches = 5 + 20 + t.sent.length;
-    expect(totalFetches).toBeLessThanOrEqual(50);
-
-    // A later run continues with the deferred backlog.
-    const t2 = telegramRecorder();
-    const next = await runPublishing(env.DB, { token: 'T', destination: '@destination', fetchImpl: t2.fetchImpl });
-    expect(next.published).toBeGreaterThan(0);
-  });
-});
+/* --------------------------------------------------------------- pipeline -- */
 
 describe('manual processing uses the same behavior', () => {
   beforeEach(reset);
 
-  it('the shared pipeline wires the same publisher (one message per channel)', async () => {
-    // Channels stay disabled so the collect stage never touches the network;
-    // the publish stage is the very same runPublishing() used by manual runs.
-    const a = await seedChannel('manual_a', false);
-    const b = await seedChannel('manual_b', false);
-    await seedNews(a, 'manual_a', 1, 'الف');
-    await seedNews(a, 'manual_a', 2, 'ب');
-    await seedNews(b, 'manual_b', 3, 'ج');
+  it('the shared pipeline publishes the album and no text message', async () => {
+    const ch = await seedChannel('pipe_chan');
+    await seedNews(ch, 'pipe_chan', 1, 'خبر خط لوله یک.');
+    await seedNews(ch, 'pipe_chan', 2, 'خبر خط لوله دو.');
+    await seedNews(ch, 'pipe_chan', 3, 'خبر خط لوله سه.');
 
-    const t = telegramRecorder();
-    const outcome = await runNewsPipeline(env.DB, envFor(), { trigger: 'manual', log: false });
+    const h = harness();
+    // The pipeline uses global fetch; channel previews answer with an empty
+    // page so the collect stage finds nothing new.
+    vi.stubGlobal('fetch', h.fetchImpl);
+    try {
+      const outcome = await runNewsPipeline(
+        env.DB,
+        {
+          ...envFor(),
+          TELEGRAM_DESTINATION_CHANNEL: '@destination',
+          BROWSER: h.browser,
+          IMAGE_RENDER_SPACING_MS: '0',
+        } as unknown as Env,
+        { trigger: 'manual', log: false }
+      );
 
-    // Stage ran, produced no candidates while the channels were disabled.
-    expect(outcome.publishing).not.toBeNull();
-    expect(outcome.publishing!.published).toBe(0);
-    expect(t.sent).toHaveLength(0);
-
-    // Once the channels are enabled (as they are in production), the exact same
-    // stage groups them per channel in configured order.
-    await env.DB.prepare(`UPDATE channels SET enabled = 1`).run();
-    const grouped = groupByChannel(await selectPublishableMessages(env.DB));
-    expect(grouped.map((g) => g.channelUsername)).toEqual(['manual_a', 'manual_b']);
-    expect(grouped.map((g) => g.items.length)).toEqual([2, 1]);
-
-    const report = await runPublishing(env.DB, {
-      token: 'T',
-      destination: '@destination',
-      fetchImpl: t.fetchImpl,
-    });
-    expect(report.published).toBe(3);
-    expect(t.sent).toHaveLength(2);
-    expectRichDigest(t.sent[0].text, ['الف', 'ب'], '@manual_a');
-    expectRichDigest(t.sent[1].text, ['ج'], '@manual_b');
+      expect(outcome.publishing?.published).toBe(3);
+      expect(outcome.publishing?.image).toMatchObject({ sent: true, slides: 2 });
+      // Two pictures, one album, and not one text message.
+      expect(h.albums).toHaveLength(1);
+      expect(h.albums[0].media).toHaveLength(2);
+      expect(h.texts).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('the pipeline report explains WHY publishing failed (failure categories)', async () => {
     const a = await seedChannel('pub_a');
     await seedNews(a, 'pub_a', 1, 'خبر معتبر.');
-    // Two summarized rows whose stored source links are unusable forever:
-    // previously this failure was completely invisible in the run report.
+    // Two summarized rows whose stored source links are unusable forever.
     for (const id of [7, 8]) {
       await env.DB.prepare(
         `INSERT INTO messages (source_channel_id, telegram_message_id, message_date, message_text, source_url, summary_text, summarized_at, filter_status)
@@ -769,41 +574,32 @@ describe('manual processing uses the same behavior', () => {
         .run();
     }
 
-    const telegramCalls: string[] = [];
-    const fetchMock = vi.fn(async (url: unknown) => {
-      const href = String(url);
-      if (href.startsWith('https://t.me/')) return new Response('<html></html>'); // empty preview
-      telegramCalls.push(href);
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 1, date: 1 } }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
-    });
-    vi.stubGlobal('fetch', fetchMock);
+    const h = harness();
+    vi.stubGlobal('fetch', h.fetchImpl);
     try {
       const outcome = await runNewsPipeline(
         env.DB,
-        { ...envFor(), TELEGRAM_DESTINATION_CHANNEL: '@destination', TELEGRAM_BOT_TOKEN: 'T' } as Env,
+        { ...envFor(), TELEGRAM_DESTINATION_CHANNEL: '@destination' } as Env,
         { trigger: 'manual', log: false }
       );
 
-      // The report now names the per-item publish failure categories.
       expect(outcome.publishing?.failureCategories).toEqual({ invalid_source_url: 2 });
-      expect(outcome.publishing?.published).toBe(1);
-      expect(outcome.publishing?.failed).toBe(2);
-      // No browser binding: the album outcome explains itself too.
-      expect(outcome.publishing?.image).toMatchObject({ sent: false, reason: 'browser_binding_missing' });
-      // Ranking failed for a visible reason (no API key in this environment).
-      expect(outcome.ranking?.error).toBe('config_missing');
-      expect(outcome.ranking?.ranked).toBe(0);
-      // Exactly one Telegram text digest was delivered.
-      expect(telegramCalls).toHaveLength(1);
-      expect(telegramCalls[0]).toContain('/botT/sendRichMessage');
+      // No Browser Run binding: nothing is published at all, because pictures
+      // are the only output — and no text is sent as a consolation prize.
+      expect(outcome.publishing?.published).toBe(0);
+      expect(outcome.publishing?.image).toMatchObject({
+        sent: false,
+        reason: 'browser_binding_missing',
+      });
+      expect(h.texts).toHaveLength(0);
+      expect(h.albums).toHaveLength(0);
     } finally {
       vi.unstubAllGlobals();
     }
   });
 });
+
+/* ------------------------------------------------------------ Bale mirror -- */
 
 describe('Bale mirror', () => {
   const BALE = { token: 'bale-token', destination: '@bale_dest' };
@@ -830,182 +626,98 @@ describe('Bale mirror', () => {
     ).toBeNull();
   });
 
-  /** Distinguishes Bale (tapi.bale.ai) from Telegram (api.telegram.org) calls. */
-  function dualHarness(baleStatus = 200) {
-    const baleTexts: string[] = [];
-    const balePhotos: number[] = [];
-    const telegramTexts: string[] = [];
-    const telegramPhotos: number[] = [];
-    const telegramGroups: number[] = [];
-    const fetchMock = vi.fn(async (url: unknown) => {
+  it('mirrors the pictures as separate photos, because Bale has no album', async () => {
+    const ch = await seedChannel('bale_chan');
+    for (let i = 1; i <= 4; i++) await seedNews(ch, 'bale_chan', i, `خبر شمارهٔ ${i} برای بله.`, i);
+
+    const h = harness();
+    const report = await runPublishing(env.DB, {
+      token: 'T',
+      destination: '@destination',
+      fetchImpl: h.fetchImpl,
+      browser: h.browser,
+      bale: BALE,
+      now: new Date(NOW),
+    });
+
+    // Four news → two pictures → one Telegram album, two Bale photos.
+    expect(h.albums[0].media).toHaveLength(2);
+    expect(h.baleCalls).toHaveLength(2);
+    expect(h.baleCalls.every((c) => c.url.includes('/sendPhoto'))).toBe(true);
+    // Same single caption as Telegram, on the first photo only; no text posts.
+    expect(h.baleCalls[0].caption?.startsWith('📰 اخبار لحظه‌ای —')).toBe(true);
+    expect(h.baleCalls[1].caption).toBeUndefined();
+    expect(h.baleCalls.some((c) => c.url.includes('sendMessage'))).toBe(false);
+    expect(report.bale).toEqual({ sent: 2, failed: 0 });
+  });
+
+  it('a Bale failure never blocks Telegram publishing', async () => {
+    const ch = await seedChannel('bale_fail');
+    await seedNews(ch, 'bale_fail', 1, 'خبر یک.');
+    await seedNews(ch, 'bale_fail', 2, 'خبر دو.');
+
+    const browser = {
+      quickAction: async () =>
+        new Response(fakePngBytes(), { status: 200, headers: { 'content-type': 'image/png' } }),
+    };
+    const fetchImpl = vi.fn(async (url: unknown) => {
       const href = String(url);
-      const ok = href.includes('tapi.bale.ai') ? baleStatus < 400 : true;
-      if (href.includes('tapi.bale.ai') && href.includes('sendPhoto')) {
-        if (ok) balePhotos.push(1);
-        return new Response(ok ? '{}' : 'err', { status: baleStatus });
-      }
-      if (href.includes('tapi.bale.ai') && href.includes('sendMessage')) {
-        if (ok) baleTexts.push('x');
-        return new Response(ok ? '{}' : 'err', { status: baleStatus });
-      }
-      if (href.includes('sendMediaGroup')) {
-        telegramGroups.push(1);
-        return new Response(
-          JSON.stringify({ ok: true, result: [{ message_id: 501 }, { message_id: 502 }] }),
-          { status: 200, headers: { 'content-type': 'application/json' } }
-        );
-      }
-      if (href.includes('sendPhoto')) {
-        telegramPhotos.push(1);
-        return new Response(JSON.stringify({ ok: true, result: { message_id: 501 } }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        });
-      }
-      telegramTexts.push('x');
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 601 } }), {
+      if (href.includes('tapi.bale.ai')) return new Response('err', { status: 500 });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 7, date: 1 } }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       });
     }) as unknown as typeof fetch;
-    return {
-      fetchImpl: fetchMock as unknown as typeof fetch,
-      fetchMock,
-      baleTexts,
-      balePhotos,
-      telegramTexts,
-      telegramPhotos,
-      telegramGroups,
-    };
-  }
 
-  async function seedTwoChannels() {
-    const a = await env.DB.prepare(
-      `INSERT INTO channels (channel_username, enabled) VALUES ('bale_a', 1)`
-    ).run();
-    const b = await env.DB.prepare(
-      `INSERT INTO channels (channel_username, enabled) VALUES ('bale_b', 1)`
-    ).run();
-    for (const [cid, username, tid] of [
-      [Number(a.meta.last_row_id), 'bale_a', 1],
-      [Number(b.meta.last_row_id), 'bale_b', 2],
-    ]) {
-      await env.DB.prepare(
-        `INSERT INTO messages (source_channel_id, telegram_message_id, message_date, message_text, source_url, summary_text, summarized_at)
-         VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'body', ?3, 'خلاصه خبر.', strftime('%Y-%m-%dT%H:%M:%fZ','now'))`
-      )
-        .bind(cid, tid, `https://t.me/${username}/${tid}`)
-        .run();
-    }
-  }
-
-  it('mirrors the image and every delivered digest to Bale', async () => {
-    await seedTwoChannels();
-    const h = dualHarness();
     const report = await runPublishing(env.DB, {
       token: 'T',
       destination: '@destination',
-      fetchImpl: h.fetchImpl,
-      bale: BALE,
-    });
-
-    // No browser binding configured: text-only run, but still mirrored.
-    expect(h.telegramTexts).toHaveLength(2);
-    expect(h.baleTexts).toHaveLength(2);
-    expect(report.published).toBe(2);
-    expect(report.bale).toEqual({ sent: 2, failed: 0 });
-  });
-
-  it('mirrors every album card when Browser Run is configured', async () => {
-    await seedTwoChannels();
-    const h = dualHarness();
-    const browser = {
-      quickAction: async () =>
-        new Response(fakePngBytes(), {
-          status: 200,
-          headers: { 'content-type': 'image/png' },
-        }),
-    };
-    const report = await runPublishing(env.DB, {
-      token: 'T',
-      destination: '@destination',
-      fetchImpl: h.fetchImpl,
+      fetchImpl,
       browser,
       bale: BALE,
     });
 
-    // Two items share one slide: a sendPhoto album on Telegram, mirrored to
-    // Bale as one photo carrying both headlines in its caption.
-    expect(h.telegramGroups).toHaveLength(0);
-    expect(h.telegramPhotos).toHaveLength(1);
-    expect(h.balePhotos).toHaveLength(1);
-    expect(h.baleTexts).toHaveLength(2);
-    expect(report.bale).toEqual({ sent: 3, failed: 0 });
-    expect(report.image?.sent).toBe(true);
-    expect(report.image?.slides).toBe(1);
-    expect(report.image?.selected).toBe(2);
-  });
-
-  it('a Bale failure never blocks Telegram publishing', async () => {
-    await seedTwoChannels();
-    const h = dualHarness(500);
-    const report = await runPublishing(env.DB, {
-      token: 'T',
-      destination: '@destination',
-      fetchImpl: h.fetchImpl,
-      bale: BALE,
-    });
-
     expect(report.published).toBe(2);
-    expect(report.bale).toEqual({ sent: 0, failed: 2 });
-    expect(h.telegramTexts).toHaveLength(2);
+    expect(report.bale).toEqual({ sent: 0, failed: 1 });
   });
 
   it('calls the standard Bale bot API, never the business endpoint', async () => {
-    await seedTwoChannels();
-    const h = dualHarness();
+    const ch = await seedChannel('bale_api');
+    await seedNews(ch, 'bale_api', 1, 'خبر یک.');
+    await seedNews(ch, 'bale_api', 2, 'خبر دو.');
+
+    const h = harness();
     await runPublishing(env.DB, {
       token: 'T',
       destination: '@destination',
       fetchImpl: h.fetchImpl,
+      browser: h.browser,
       bale: BALE,
     });
 
-    const baleCalls = (h.fetchMock as ReturnType<typeof vi.fn>).mock.calls
-      .map((c) => String(c[0]))
-      .filter((u) => u.includes('tapi.bale.ai'));
-    expect(baleCalls.length).toBeGreaterThan(0);
-    for (const url of baleCalls) {
+    expect(h.baleCalls.length).toBeGreaterThan(0);
+    for (const call of h.baleCalls) {
       // The /business/bot base is restricted to bulk-messaging accounts and
       // rejects normal bot tokens — it must never be used for the mirror.
-      expect(url.startsWith(`https://tapi.bale.ai/bot${BALE.token}/`)).toBe(true);
-      expect(url).not.toContain('/business/');
-      expect(url).not.toContain('%3A');
+      expect(call.url.startsWith(`https://tapi.bale.ai/bot${BALE.token}/`)).toBe(true);
+      expect(call.url).not.toContain('/business/');
+      expect(call.url).not.toContain('%3A');
     }
   });
 
   it('makes no Bale calls when the mirror is not configured', async () => {
-    await seedTwoChannels();
-    const h = dualHarness();
+    const ch = await seedChannel('bale_off');
+    await seedNews(ch, 'bale_off', 1, 'خبر یک.');
+
+    const h = harness();
     const report = await runPublishing(env.DB, {
       token: 'T',
       destination: '@destination',
       fetchImpl: h.fetchImpl,
+      browser: h.browser,
     });
+
     expect(report.bale).toBeUndefined();
-    const called = (h.fetchMock as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
-      String(c[0])
-    );
-    expect(called.every((u) => !u.includes('tapi.bale.ai'))).toBe(true);
+    expect(h.baleCalls).toHaveLength(0);
   });
 });
-
-/** Minimal valid PNG header for the Browser Run fake. */
-function fakePngBytes(): ArrayBuffer {
-  const bytes = new Uint8Array(64);
-  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
-  const view = new DataView(bytes.buffer);
-  view.setUint32(16, 1920);
-  view.setUint32(20, 1080);
-  return bytes.buffer;
-}

@@ -23,8 +23,8 @@
  *  - The images are never persisted. Each PNG exists as one local variable
  *    for the duration of the send and is dropped immediately afterwards;
  *    nothing is written to D1, R2 or any other store.
- *  - The album is completely independent of the per-channel text digests:
- *    those are still built and sent by `runPublishing()` exactly as before.
+ *  - The album is the ONLY thing `runPublishing()` sends: the bot is
+ *    picture-only, so there is no text digest to fall back on.
  */
 
 import type { PublishableMessage } from './publisher';
@@ -39,11 +39,18 @@ import { formatTehranDateTime, tehranParts } from './time';
  */
 export const IMAGE_WIDTH = 2560;
 export const IMAGE_HEIGHT = 1440;
-/** One slide covers four news items: the fixed 2×2 grid of the template. */
-export const MAX_IMAGE_ITEMS = 4;
+/**
+ * One slide covers TWO news items: the fixed side-by-side board.
+ *
+ * Two cards per 2560×1440 slide give each item half the canvas, so the
+ * headline and the introductory text are rendered large enough to read in a
+ * Telegram preview without opening the photo. This is what replaced the text
+ * digest: the picture IS the message, so it has to be legible.
+ */
+export const MAX_IMAGE_ITEMS = 2;
 /** Slides per album; Telegram `sendMediaGroup` accepts at most ten photos. */
-export const MAX_ALBUM_SLIDES = 10;
-/** News items the whole slideshow can carry (MAX_ALBUM_SLIDES × 4). */
+export const MAX_ALBUM_SLIDES = 6;
+/** The run's top news, as pictures: MAX_ALBUM_SLIDES × 2 = 12 per album. */
 export const MAX_ALBUM_NEWS = MAX_ALBUM_SLIDES * MAX_IMAGE_ITEMS;
 
 /** Below this, a single sentence is too short to work as a headline. */
@@ -85,14 +92,14 @@ export async function browserScreenshot(
 }
 
 export interface ImageNewsItem {
-  /** Same row id the text digest marks published; not used for publishing. */
+  /** Row id marked published once the album is delivered. */
   id: number;
   channelUsername: string;
   /** AI topic category, used only for the small topic emoji. */
   category?: string | null;
-  /** Derived from the same summary text the digest publishes. */
+  /** AI headline, or one derived from the summary for legacy rows. */
   title: string;
-  /** Byte-identical to the summary the Telegram digest will carry. */
+  /** The stored summary text, byte-identical — the card IS the message. */
   summary: string;
 }
 
@@ -175,7 +182,7 @@ export function channelLabel(name: string): string {
  *
  * There is no title column and the summarizer is explicitly instructed to emit
  * summary text only, so the headline is built from the SAME summary string the
- * digest publishes: the leading sentence(s), extended only when a single short
+ * card carries: the leading sentence(s), extended only when a single short
  * sentence would make a meaningless headline. No second AI call, no schema
  * change and no invented text.
  */
@@ -313,18 +320,18 @@ const ACCENTS = ['#1fb98a', '#f0b34a', '#5b9dff', '#d34f74'];
 
 /**
  * Frosted white "liquid glass" frame as HTML/CSS: pastel mesh background, glossy
- * bubbles, a big glass board holding one glass card per news item. Layout:
- * 1 item centred, 2 side by side, 3 as 1-over-2, 4 as 2x2. Text is laid out by
- * the browser, so Persian shaping is native.
+ * bubbles, a big glass board holding one glass card per news item. Text is laid
+ * out by the browser, so Persian shaping is native.
  *
- * `layout: 'four'` forces the FIXED 2×2 news board — the layout every full
- * album slide uses, so the slideshow has one constant template with clearly
- * defined sections (header / news board / ticker / footer). The adaptive
- * layouts remain only for the trailing partial slide and the preview page.
+ * `layout: 'fixed'` forces the FIXED news board — two large cards side by side,
+ * the layout every full album slide uses, so the slideshow has one constant
+ * template with clearly defined sections (header / news board / ticker /
+ * footer). `'auto'` adapts to the card count and is used only by the trailing
+ * partial slide (a single card) and the preview page.
  */
-export function buildImageHtml(frame: ImageFrame, layout: 'auto' | 'four' = 'auto'): string {
-  // The four-card maximum is enforced here as well as in selectTopNews(), so the
-  // template can never lay out a fifth card outside the 2x2 grid.
+export function buildImageHtml(frame: ImageFrame, layout: 'auto' | 'fixed' = 'auto'): string {
+  // The two-card maximum is enforced here as well as in selectTopNews(), so the
+  // template can never lay out a third card outside the fixed board.
   const items = frame.items.slice(0, MAX_IMAGE_ITEMS);
   const cards = items
     .map((item, i) => {
@@ -341,9 +348,9 @@ export function buildImageHtml(frame: ImageFrame, layout: 'auto' | 'four' = 'aut
     .join('\n        ');
 
   const grid =
-    layout === 'four'
-      ? 'four' // FIXED slide layout: always the 2×2 news board.
-      : ['one', 'two', 'three', 'four'][Math.max(0, Math.min(3, items.length - 1))];
+    layout === 'fixed'
+      ? 'two' // FIXED slide layout: always the two-card board.
+      : ['one', 'two'][Math.max(0, Math.min(1, items.length - 1))];
   const tickerItems = frame.ticker ?? [];
 
   return `<!DOCTYPE html>
@@ -396,9 +403,6 @@ export function buildImageHtml(frame: ImageFrame, layout: 'auto' | 'four' = 'aut
     box-shadow:0 40px 80px rgba(70,82,110,.18),0 0 0 6px rgba(255,255,255,.14),inset 2px 2px 3px rgba(255,255,255,.95),inset -2px -2px 6px rgba(170,182,205,.28),inset 0 0 40px rgba(255,255,255,.35)}
   .grid.one{grid-template-columns:1fr;grid-template-rows:1fr}
   .grid.two{grid-template-columns:1fr 1fr;grid-template-rows:1fr}
-  .grid.three{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
-  .grid.three .card:first-child{grid-column:1/-1}
-  .grid.four{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
   .card{position:relative;overflow:hidden;min-height:0;display:flex;flex-direction:column;justify-content:flex-start;gap:18px;padding:34px 42px;border-radius:34px;
     background:linear-gradient(145deg,rgba(255,255,255,.78),rgba(255,255,255,.34));border:1px solid rgba(255,255,255,.78);
     box-shadow:inset 1px 1px 2px rgba(255,255,255,.9),0 12px 24px rgba(70,82,110,.12)}
@@ -413,10 +417,11 @@ export function buildImageHtml(frame: ImageFrame, layout: 'auto' | 'four' = 'aut
   .live{align-self:flex-start;display:flex;align-items:center;gap:10px;height:40px;padding:0 18px;border-radius:15px;font-size:21px;font-weight:600;color:var(--up);
     background:rgba(21,157,120,.1);border:1px solid rgba(21,157,120,.25)}
   .live::before{content:"";width:11px;height:11px;border-radius:50%;background:var(--up);box-shadow:0 0 0 5px rgba(21,157,120,.18)}
-  .grid.one h2{font-size:76px}.grid.one p{font-size:50px;-webkit-line-clamp:7}.grid.one .icon{width:102px;height:102px;font-size:56px}
-  .grid.two h2{font-size:62px;-webkit-line-clamp:3}.grid.two p{font-size:40px;-webkit-line-clamp:6}
-  .grid.three .card:first-child p{-webkit-line-clamp:3}.grid.three p{-webkit-line-clamp:3}.grid.three h2{font-size:46px}
-  .grid.four h2{font-size:44px}.grid.four p{font-size:32px;-webkit-line-clamp:3}
+  /* The picture IS the message now, so both layouts run large: a reader must
+     be able to follow the news from the Telegram preview alone. */
+  .grid.one h2{font-size:80px}.grid.one p{font-size:52px;-webkit-line-clamp:8}.grid.one .icon{width:102px;height:102px;font-size:56px}
+  .grid.two h2{font-size:64px;-webkit-line-clamp:3}.grid.two p{font-size:44px;-webkit-line-clamp:9}
+  .grid.two .icon{width:92px;height:92px;font-size:50px}.grid.two .sub{font-size:28px}
   .ticker{display:flex;align-items:flex-start;gap:24px;margin-top:18px;padding:20px 34px;border-radius:30px;
     background:linear-gradient(145deg,rgba(255,255,255,.58),rgba(255,255,255,.28));border:1px solid rgba(255,255,255,.7);
     box-shadow:inset 1px 1px 2px rgba(255,255,255,.9),0 8px 18px rgba(70,82,110,.08)}
@@ -484,8 +489,8 @@ export function buildRunFrame(
 }
 
 /**
- * Splits the run's selected news into slides of four (the last slide may hold
- * fewer). The slideshow covers the whole run this way: nothing is relegated to
+ * Splits the run's selected news into slides of two (the last slide may hold
+ * one). The slideshow covers the whole run this way: nothing is relegated to
  * a tiny ticker line while slide capacity remains.
  */
 export function chunkSlides(
@@ -684,11 +689,11 @@ function describeRenderError(error: unknown): string {
 }
 
 /**
- * Renders THE run album: a slideshow in which every slide covers four news
- * items (the last one may hold fewer), laid out by the FIXED white template.
+ * Renders THE run album: a slideshow in which every slide covers two news
+ * items (the last one may hold one), laid out by the FIXED white template.
  *
  * Selection takes the run's most important news up to the album capacity
- * (`MAX_ALBUM_SLIDES` × 4 items); when AI limits left fewer summarized items,
+ * (`MAX_ALBUM_SLIDES` × 2 = 12 items); when AI limits left fewer summarized items,
  * the slideshow is simply shorter. Whatever still does not fit rides along as
  * the last slide's ticker strip and caption overflow line.
  *
@@ -740,10 +745,10 @@ export async function renderRunAlbum(opts: RenderAlbumOptions): Promise<Rendered
     if (i > 0) await sleepImpl(spacing);
 
     const chunk = slideChunks[i];
-    // Every FULL slide uses the fixed 2×2 news board; only a trailing partial
+    // Every FULL slide uses the fixed two-card board; only a trailing partial
     // slide lets the adaptive grid fill the board (same template, same
-    // sections — just 1-3 cards spread over the 2×2 area).
-    const layout: 'auto' | 'four' = chunk.length === MAX_IMAGE_ITEMS ? 'four' : 'auto';
+    // sections — just one card spread over the whole area).
+    const layout: 'auto' | 'fixed' = chunk.length === MAX_IMAGE_ITEMS ? 'fixed' : 'auto';
     const isLastSlide = i === slideCount - 1;
     const html = buildImageHtml(
       buildSlideFrame(
@@ -820,71 +825,28 @@ export async function renderRunAlbum(opts: RenderAlbumOptions): Promise<Rendered
   };
 }
 
-/** Telegram caption limit, kept below the 1024 hard limit for headroom. */
+/** The album caption is one short line; Telegram allows up to 1024 chars. */
 export const MAX_CAPTION_CHARS = 1000;
-/** One caption line per slide headline; keeps four items + header < 1000. */
-const CAPTION_HEADLINE_CHARS = 150;
 
-/** Strips control characters so a caption is always plain, single-line-safe text. */
-function cleanCaptionLine(text: string, limit: number = Number.MAX_SAFE_INTEGER): string {
-  const clean = text
-    .replace(/[\u0000-\u001F\u007F]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return clean.length <= limit ? clean : `${clean.slice(0, limit - 1).trimEnd()}…`;
-}
+/** Brand shown on the album caption and in the picture header. */
+export const BRAND_NAME = 'اخبار لحظه‌ای';
 
 /**
- * Builds the plain-text caption of every album slide.
+ * The album's ONE caption: a single date line, nothing else.
  *
- * Layout (no HTML, so neither Telegram nor Bale can reject the markup):
+ * The run is published as pictures only — headlines, summaries and sources all
+ * live inside the rendered slides, so the caption exists purely to date-stamp
+ * the album in the channel. Two rules shape it:
  *
- *   slide 1:  📰 اخبار لحظه‌ای — ۱۴۰۵/۰۷/۱۲ ساعت ۱۴:۳۰ تهران
- *             {emoji} <headline>
- *             📡 منبع: @channel
- *             … (one pair per news item on the slide)
- *   slide N:  {emoji} <headline> + 📡 منبع pairs
- *             🔎 سایر عناوین: … · … · و n خبر دیگر   (overflow only)
+ *  1. ONE caption per album. Telegram renders a media group as a single
+ *     swipeable slideshow only while exactly one photo carries a caption, so
+ *     `sendMediaGroup` attaches this string to the first photo and no other.
+ *  2. Plain text, no parse mode, so nothing can ever be rejected.
  *
- * The run header lands on the first slide; when the slideshow cannot carry the
- * whole run (more than MAX_ALBUM_NEWS items) the last slide lists what is left.
+ *   📰 اخبار لحظه‌ای — ۱۴۰۵/۰۷/۱۳ - ۱۴:۳۰ تهران
  */
-export function buildAlbumCaptions(
-  slides: readonly (readonly ImageNewsItem[])[],
-  ticker: readonly TickerNewsItem[],
-  hidden: number,
-  now: Date
-): string[] {
-  const stamp = formatTehranDateTime(now) ?? '';
-  const overflow =
-    hidden > 0
-      ? ticker.some((t) => t.more)
-        ? ''
-        : `و ${faDigits(hidden)} خبر دیگر`
-      : '';
-
-  return slides.map((items, index) => {
-    const lines: string[] = [];
-    if (index === 0 && stamp) lines.push(`📰 اخبار لحظه‌ای — ${stamp} تهران`);
-
-    for (const item of items) {
-      const topic = topicPresentation(item.category, `${item.title} ${item.summary}`);
-      lines.push(`${topic.emoji} ${cleanCaptionLine(item.title, CAPTION_HEADLINE_CHARS)}`);
-      lines.push(`📡 منبع: ${channelLabel(item.channelUsername)}`);
-    }
-
-    if (index === slides.length - 1) {
-      const headlines = ticker.map((t) => cleanCaptionLine(t.text)).filter(Boolean);
-      if (headlines.length > 0) {
-        lines.push(`🔎 سایر عناوین: ${headlines.join(' · ')}`);
-      } else if (overflow) {
-        lines.push(`🔎 ${overflow}`);
-      }
-    }
-
-    const caption = lines.join('\n');
-    return caption.length > MAX_CAPTION_CHARS
-      ? `${caption.slice(0, MAX_CAPTION_CHARS - 1).trimEnd()}…`
-      : caption;
-  });
+export function buildAlbumCaption(now: Date): string {
+  const stamp = formatTehranDateTime(now);
+  const caption = stamp ? `📰 ${BRAND_NAME} — ${stamp} تهران` : `📰 ${BRAND_NAME}`;
+  return caption.length > MAX_CAPTION_CHARS ? caption.slice(0, MAX_CAPTION_CHARS) : caption;
 }

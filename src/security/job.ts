@@ -29,6 +29,7 @@ import {
   type JobStatus,
 } from '../lib/jobs';
 import { localDateKey, resolveTimeZone } from '../lib/jalali';
+import { getSetting } from '../settings';
 import { resolveDailyBudget } from '../llm/budget';
 import { resolveProviders } from '../llm/providers';
 import { resolveDestination } from '../publisher';
@@ -82,6 +83,18 @@ export interface SecurityJobResult {
   selected: number;
   /** Telegram messages delivered. */
   messages: number;
+  /**
+   * The rendered digest, exactly as it was (or would have been) sent. Always
+   * populated when something was built, so the admin panel can show the
+   * operator the post instead of a count.
+   */
+  preview?: string[];
+  /** True when this run deliberately sent nothing (admin preview). */
+  dryRun?: boolean;
+  /** True when an admin override ran past an existing daily claim. */
+  forced?: boolean;
+  /** Whether a destination channel is configured at all. */
+  destinationConfigured?: boolean;
   feedsOk: number;
   feedsFailed: number;
   claimDate: string;
@@ -95,6 +108,22 @@ export interface RunSecurityOptions {
   fetchImpl?: typeof fetch;
   /** Overrides the configured feed list. Tests only. */
   sources?: readonly SecuritySource[];
+  /**
+   * Admin override: run even if today's claim is already taken.
+   *
+   * The daily claim exists so the cron cannot double-post; an operator who
+   * deliberately presses "force" in the hunt panel is a different situation,
+   * and without this a failed morning run meant waiting 24 hours.
+   */
+  force?: boolean;
+  /**
+   * Build the digest and return it WITHOUT sending, claiming or recording
+   * anything. The admin preview, and the only safe way to see what tonight's
+   * post would look like.
+   */
+  dryRun?: boolean;
+  /** Explicit destination, bypassing the stored setting and the secret. */
+  destination?: DestinationChat | null;
 }
 
 interface Candidate {
@@ -332,21 +361,41 @@ export async function runSecurityJob(
     health: [],
   };
 
-  const destination = resolveSecurityDestination(env);
+  const dryRun = opts.dryRun === true;
+  const destination =
+    opts.destination !== undefined ? opts.destination : await loadSecurityDestination(env);
   const token = env.TELEGRAM_BOT_TOKEN?.trim();
-  if (!destination || !token) {
+  base.destinationConfigured = Boolean(destination);
+  base.dryRun = dryRun || undefined;
+
+  // A preview needs neither a destination nor a token: showing an operator
+  // WHY nothing is being posted is the whole point of the admin panel.
+  if ((!destination || !token) && !dryRun) {
     return { ...base, reason: 'destination_or_token_missing' };
   }
 
   // --- once per day --------------------------------------------------------
-  let claim: Awaited<ReturnType<typeof claimDailyJob>>;
-  try {
-    claim = await claimDailyJob(env.DB, 'security', timeZone, now);
-  } catch (error) {
-    return { ...base, status: 'failed', reason: `claim: ${describeError(error, 80)}` };
-  }
-  if (!claim.won) {
-    return { ...base, alreadyClaimed: true, reason: `already_${claim.existingStatus ?? 'claimed'}` };
+  // A dry run never touches the claim: previewing today's digest must not
+  // consume today's single send.
+  let claim: Awaited<ReturnType<typeof claimDailyJob>> = { won: true, date: today };
+  if (!dryRun) {
+    try {
+      claim = await claimDailyJob(env.DB, 'security', timeZone, now);
+    } catch (error) {
+      return { ...base, status: 'failed', reason: `claim: ${describeError(error, 80)}` };
+    }
+    if (!claim.won) {
+      if (!opts.force) {
+        return {
+          ...base,
+          alreadyClaimed: true,
+          reason: `already_${claim.existingStatus ?? 'claimed'}`,
+        };
+      }
+      // Forced: keep going on the existing claim row, and say so in the result.
+      base.alreadyClaimed = true;
+      base.forced = true;
+    }
   }
 
   // --- 1. fetch ------------------------------------------------------------
@@ -359,7 +408,7 @@ export async function runSecurityJob(
   base.items = health.reduce((sum, entry) => sum + entry.items, 0);
 
   if (base.feedsOk === 0) {
-    await releaseClaim(env.DB, 'security', claim.date);
+    if (!dryRun) await releaseClaim(env.DB, 'security', claim.date);
     return { ...base, status: 'failed', reason: 'all_feeds_failed' };
   }
 
@@ -393,7 +442,7 @@ export async function runSecurityJob(
   base.candidates = allCandidates.length;
 
   if (allCandidates.length === 0) {
-    await markClaimSkipped(env.DB, 'security', claim.date, 'no_candidates');
+    if (!dryRun) await markClaimSkipped(env.DB, 'security', claim.date, 'no_candidates');
     return { ...base, reason: 'no_candidates' };
   }
 
@@ -402,13 +451,13 @@ export async function runSecurityJob(
   try {
     fresh = await filterUnseen(env.DB, allCandidates);
   } catch (error) {
-    await releaseClaim(env.DB, 'security', claim.date);
+    if (!dryRun) await releaseClaim(env.DB, 'security', claim.date);
     return { ...base, status: 'failed', reason: `dedupe: ${describeError(error, 60)}` };
   }
   base.fresh = fresh.length;
 
   if (fresh.length === 0) {
-    await markClaimSkipped(env.DB, 'security', claim.date, 'all_already_posted');
+    if (!dryRun) await markClaimSkipped(env.DB, 'security', claim.date, 'all_already_posted');
     return { ...base, reason: 'all_already_posted' };
   }
 
@@ -482,8 +531,21 @@ export async function runSecurityJob(
 
   const messages = buildDigestMessages(sections, digestDate(now, timeZone));
   if (messages.length === 0) {
-    await markClaimSkipped(env.DB, 'security', claim.date, 'nothing_to_render');
+    if (!dryRun) await markClaimSkipped(env.DB, 'security', claim.date, 'nothing_to_render');
     return { ...base, reason: 'nothing_to_render' };
+  }
+  base.preview = messages;
+
+  // A preview stops here: nothing is sent, nothing is marked seen, and the
+  // items stay eligible for the real run tonight.
+  if (dryRun) {
+    return { ...base, status: 'skipped', reason: 'dry_run' };
+  }
+
+  // Unreachable for a real run (the guard above the claim already returned),
+  // but it is what tells the compiler the send below has a target.
+  if (!destination || !token) {
+    return { ...base, reason: 'destination_or_token_missing' };
   }
 
   // --- 5. send -------------------------------------------------------------
@@ -540,6 +602,49 @@ function deliveredCandidates(
  * missing secret means "do not publish" rather than "dump security writeups
  * into the Persian finance channel".
  */
+/**
+ * Settings key holding a security channel configured from the admin panel.
+ *
+ * The secret stays the deployment-level answer; this is the runtime one, so an
+ * operator can point the hunt digest at a channel without a redeploy. The
+ * stored value wins when both exist, because it is the one somebody set most
+ * recently and can see in the UI.
+ */
+export const SECURITY_CHANNEL_SETTING = 'security_channel';
+
+/** Validates and normalizes a channel the operator typed. */
+export function normalizeSecurityChannel(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const value = raw.trim();
+  if (!value) return null;
+  if (value === 'MAIN') return 'MAIN';
+  const withAt = /^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(value) ? `@${value}` : value;
+  return isValidChannel(withAt) ? withAt : null;
+}
+
+/**
+ * The destination actually used by a run: the stored setting first, then the
+ * `TELEGRAM_SECURITY_CHANNEL` secret. Never throws — a settings-table hiccup
+ * degrades to the secret rather than cancelling the digest.
+ */
+export async function loadSecurityDestination(env: Env): Promise<DestinationChat | null> {
+  let stored: string | null = null;
+  try {
+    stored = await getSetting(env.DB, SECURITY_CHANNEL_SETTING);
+  } catch {
+    stored = null;
+  }
+  if (stored) {
+    const normalized = normalizeSecurityChannel(stored);
+    if (normalized) {
+      return normalized === 'MAIN'
+        ? resolveDestination(env)
+        : (normalized as DestinationChat);
+    }
+  }
+  return resolveSecurityDestination(env);
+}
+
 export function resolveSecurityDestination(env: Env): DestinationChat | null {
   const raw = env.TELEGRAM_SECURITY_CHANNEL?.trim();
   if (!raw) return null;
