@@ -112,9 +112,32 @@ export class TelegramRateLimitError extends TelegramError {
   }
 }
 
+/** One size of a photo Telegram stored for us. */
+export interface TelegramPhotoSize {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
+}
+
 export interface SentMessage {
   message_id: number;
   date: number;
+  /**
+   * Present on photo messages. Telegram returns every stored size, largest
+   * last. Re-sending a `file_id` is free and instant, which is how the
+   * `/slideshow` browser pages through an album without re-rendering.
+   */
+  photo?: TelegramPhotoSize[];
+}
+
+/** The largest stored size's file_id, or null for a non-photo message. */
+export function largestPhotoFileId(message: SentMessage | undefined): string | null {
+  const sizes = message?.photo;
+  if (!Array.isArray(sizes) || sizes.length === 0) return null;
+  const largest = sizes.reduce((a, b) => ((b.width ?? 0) * (b.height ?? 0) > (a.width ?? 0) * (a.height ?? 0) ? b : a));
+  return typeof largest.file_id === 'string' && largest.file_id ? largest.file_id : null;
 }
 
 export type TelegramParseMode = 'HTML' | 'MarkdownV2';
@@ -307,6 +330,11 @@ export interface SendPhotoOptions extends TelegramClientOptions {
   photo: ArrayBuffer;
   caption?: string;
   disableNotification?: boolean;
+  /**
+   * Inline keyboard. Only the private-chat `/slideshow` browser uses this —
+   * channel posts are deliberately button-free.
+   */
+  replyMarkup?: InlineKeyboardMarkup;
   timeoutMs?: number;
 }
 
@@ -332,6 +360,7 @@ export async function sendPhoto(opts: SendPhotoOptions): Promise<SentMessage> {
   form.set('photo', new Blob([opts.photo], { type: 'image/png' }), 'news.png');
   if (opts.caption) form.set('caption', opts.caption);
   if (opts.disableNotification) form.set('disable_notification', 'true');
+  if (opts.replyMarkup) form.set('reply_markup', JSON.stringify(opts.replyMarkup));
 
   let res: Response;
   try {
@@ -502,6 +531,67 @@ export async function editMessageText(opts: EditMessageOptions): Promise<EditMes
     const description = data?.description ?? '';
     if (/not modified/i.test(description)) return { edited: false, notModified: true };
     throw new TelegramError(res.status, description || `editMessageText failed (HTTP ${res.status}).`);
+  }
+  return { edited: true, notModified: false };
+}
+
+export interface EditMessageMediaOptions extends TelegramClientOptions {
+  chatId: string;
+  messageId: number;
+  /**
+   * An EXISTING Telegram `file_id`. Re-using a file_id costs no upload and no
+   * re-render, which is what makes paging through a slideshow instant.
+   */
+  fileId: string;
+  /** Plain-text caption (no parse mode, so nothing can fail to parse). */
+  caption?: string;
+  replyMarkup?: InlineKeyboardMarkup;
+  timeoutMs?: number;
+}
+
+/**
+ * Bot API `editMessageMedia` — swaps the photo of an already-sent message.
+ *
+ * Used only by the private-chat `/slideshow` browser. "Message is not
+ * modified" is reported, not thrown: it just means the user pressed a button
+ * that lands on the slide already displayed.
+ */
+export async function editMessageMedia(
+  opts: EditMessageMediaOptions
+): Promise<{ edited: boolean; notModified: boolean }> {
+  const doFetch = opts.fetchImpl ?? fetch;
+  const base = opts.baseUrl ?? API_BASE;
+
+  const payload: Record<string, unknown> = {
+    chat_id: opts.chatId,
+    message_id: opts.messageId,
+    media: {
+      type: 'photo',
+      media: opts.fileId,
+      ...(opts.caption ? { caption: opts.caption.slice(0, 1024) } : {}),
+    },
+  };
+  if (opts.replyMarkup) payload.reply_markup = opts.replyMarkup;
+
+  let res: Response;
+  try {
+    res = await doFetch(`${base}/bot${opts.token}/editMessageMedia`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? SEND_TIMEOUT_MS),
+    });
+  } catch (e) {
+    const reason = e instanceof Error && e.name === 'TimeoutError' ? 'timed out' : message(e);
+    throw new TelegramError(0, `Telegram editMessageMedia failed: ${reason}`);
+  }
+
+  const data = (await res.json().catch(() => null)) as { ok: boolean; description?: string } | null;
+
+  if (!res.ok || !data?.ok) {
+    const description = data?.description ?? '';
+    if (/not modified/i.test(description)) return { edited: false, notModified: true };
+    throw new TelegramError(res.status, description || `editMessageMedia failed (HTTP ${res.status}).`);
   }
   return { edited: true, notModified: false };
 }

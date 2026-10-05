@@ -31,14 +31,36 @@ beforeEach(async () => {
  */
 const CRON = wranglerConfig.triggers.crons;
 
+/** The digest pipeline trigger, unchanged since the first deploy. */
+const PIPELINE_CRON = '30 */2 * * *';
+
 describe('cron schedule', () => {
-  it('is the single trigger that starts every other Iranian hour', () => {
-    expect(CRON).toEqual(['30 */2 * * *']);
+  it('still starts the digest pipeline every other Iranian hour', () => {
+    expect(CRON).toContain(PIPELINE_CRON);
   });
 
-  it('creates exactly one bi-hourly trigger (no duplicates)', () => {
-    expect(CRON).toHaveLength(1);
+  it('creates exactly one bi-hourly pipeline trigger (no duplicates)', () => {
     expect(CRON.filter((c) => /^30 \*\/2 \* \* \*$/.test(c))).toHaveLength(1);
+    expect(new Set(CRON).size).toBe(CRON.length);
+  });
+
+  it('declares the scheduled jobs and stays inside the 5-trigger account limit', () => {
+    // Workers Free allows 5 Cron Triggers per account; we use 4.
+    expect(CRON.length).toBeLessThanOrEqual(5);
+    expect(CRON).toEqual([
+      PIPELINE_CRON, // existing news digest
+      '*/5 * * * *', // breaking-news scan
+      '30 4 * * *', // Forex Factory daily list — 08:00 Asia/Tehran
+      '0 */3 * * *', // slideshow, offset off :30 so it never collides
+    ]);
+  });
+
+  it('fires the daily calendar job at 08:00 Tehran time', () => {
+    // 04:30 UTC + 03:30 (Iran has no DST) == 08:00 local, every day.
+    const instant = new Date(Date.UTC(2026, 0, 15, 4, 30, 0));
+    const tehran = tehranParts(instant)!;
+    expect(tehran.hour).toBe(8);
+    expect(tehran.minute).toBe(0);
   });
 
   it('uses only UTC cron syntax Cloudflare supports', () => {
@@ -183,8 +205,8 @@ describe('manual processing is independent of the cron schedule', () => {
 
     // The manual path is labelled 'manual' and is not tied to any cron firing.
     expect(outcome.trigger).toBe('manual');
-    expect(CRON).toEqual(['30 */2 * * *']);
-    expect(CRON).toHaveLength(1);
+    // Adding the scheduled jobs must not have disturbed the pipeline trigger.
+    expect(CRON).toContain(PIPELINE_CRON);
 
     // Bookkeeping still records which trigger produced the run.
     const row = await env.DB.prepare(

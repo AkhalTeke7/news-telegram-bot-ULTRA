@@ -9,6 +9,8 @@
     "predeploy": "npm install",
     "deploy": "wrangler deploy",
     "build": "wrangler deploy --dry-run --outdir dist",
+    "build:fonts": "node scripts/build-fonts.mjs",
+    "preview:slide": "node scripts/preview-slide.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "db:migrate:local": "wrangler d1 migrations apply news-bot --local",
@@ -19,16 +21,21 @@
     "secret:put:opencode": "wrangler secret put OPENCODE_API_KEY",
     "secret:put:destination": "wrangler secret put TELEGRAM_DESTINATION_CHANNEL",
     "secret:put:tgadmin": "wrangler secret put TELEGRAM_ADMIN_USER_ID",
-    "secret:put:tgwebhook": "wrangler secret put TELEGRAM_WEBHOOK_SECRET"
+    "secret:put:tgwebhook": "wrangler secret put TELEGRAM_WEBHOOK_SECRET",
+    "secret:put:nvidia": "wrangler secret put NVIDIA_API_KEY",
+    "secret:put:opencodezen": "wrangler secret put OPENCODE_ZEN_API_KEY",
+    "secret:put:kilo": "wrangler secret put KILO_API_KEY"
   },
   "dependencies": {
     "hono": "^4.13.12",
-    "tg-rich-messages": "^0.4.0"
+    "tg-rich-messages": "^0.4.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^5.20261002.1",
     "typescript": "^7.0.2",
+    "vazirmatn": "^33.0.3",
     "vitest": "^4.1.11",
     "wrangler": "^4.147.0"
   }

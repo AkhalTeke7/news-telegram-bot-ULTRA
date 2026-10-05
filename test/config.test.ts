@@ -2,9 +2,20 @@ import { describe, expect, it } from 'vitest';
 import wranglerConfig from '../wrangler.json';
 
 describe('wrangler config', () => {
-  it('declares the bi-hourly cron trigger (every other Iranian hour)', () => {
-    // Cloudflare cron is UTC-only; Iran is UTC+03:30, so :30 UTC == :00 Tehran.
-    expect(wranglerConfig.triggers.crons).toEqual(['30 */2 * * *']);
+  it('declares every cron trigger (UTC-only; Iran is UTC+03:30, so :30 UTC == :00 Tehran)', () => {
+    expect(wranglerConfig.triggers.crons).toEqual([
+      '30 */2 * * *', // news digest pipeline (pre-existing)
+      '*/5 * * * *', // breaking-news scan
+      '30 4 * * *', // Forex Factory daily list -> 08:00 Asia/Tehran
+      '0 */3 * * *', // slideshow
+    ]);
+  });
+
+  it('binds KV, R2 and the browser without leaking ids into vars', () => {
+    expect(wranglerConfig.kv_namespaces[0].binding).toBe('KV');
+    expect(wranglerConfig.r2_buckets[0].binding).toBe('MEDIA');
+    expect(wranglerConfig.browser.binding).toBe('BROWSER');
+    expect(wranglerConfig.vars.TIMEZONE).toBe('Asia/Tehran');
   });
 
   it('binds D1 with a migrations dir and keeps secrets out of config', () => {
