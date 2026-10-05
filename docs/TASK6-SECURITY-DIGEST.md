@@ -18,12 +18,13 @@ want to know *why* HackerOne, Bugcrowd and YesWeHack are absent.
 | | |
 | --- | --- |
 | Cron | `30 16 * * *` UTC = **20:00 Asia/Tehran**, daily |
-| Destination | `TELEGRAM_SECURITY_CHANNEL` secret — **unset ⇒ job publishes nothing** |
+| Destination | 🎯 HUNT console setting, else the `TELEGRAM_SECURITY_CHANNEL` secret — **neither ⇒ job publishes nothing** |
+| Operator UI | **🎯 HUNT** button in the admin panel header → `#hunt` (see below) |
 | Language | English only, verbatim from the source |
 | LLM calls | **1 per day**, and the digest still publishes without it |
 | Feeds | 6 |
 | New table | `security_seen` (migration `0013`) |
-| New files | `src/security/{sources,filter,select,job}.ts` |
+| New files | `src/security/{sources,filter,select,job,admin}.ts` |
 
 ---
 
@@ -338,3 +339,50 @@ delete the entry, the `id` is a foreign key into `security_seen`.
 To move the post time, change `SECURITY_CRON` in `src/scheduler.ts` **and**
 `triggers.crons` in `wrangler.json`; `test/config.test.ts` and
 `test/time.test.ts` fail if the two ever disagree.
+
+---
+
+## 9. The HUNT console
+
+This job is invisible by construction: it runs once a day inside `scheduled()`
+and its commonest failure — no destination configured — is a *silent skip*.
+`src/security/admin.ts` plus four endpoints under `/api/security/*` exist so an
+operator can see and fix that from the admin panel's **🎯 HUNT** view.
+
+| Endpoint | What it answers |
+| --- | --- |
+| `GET /api/security/overview` | Is a channel set, and from where? When did the job last run, and what did it say? Is today already claimed? How many articles have been delivered? |
+| `POST /api/security/channel` | Point the digest at a channel **without a redeploy** (`{channel: null}` falls back to the secret, `MAIN` uses the Persian news channel). Validated, stored in `ai_settings`, never echoed back in full. |
+| `POST /api/security/feeds/probe` | Fetch all six feeds right now: items, items kept by `filter.ts`, items not in `security_seen`, staleness against each source's own `staleHours`, three sample headlines. |
+| `POST /api/security/run` | `preview` / `send` / `force`. |
+
+### The three run modes
+
+`runSecurityJob(env, opts)` grew two options, and the guarantees matter:
+
+* **`dryRun: true`** — builds the digest and returns it in `result.preview`.
+  Touches *nothing*: no claim, no `security_seen` row, no Telegram call. It
+  works even with no destination configured, which is the point — you can see
+  the post before you have a channel for it. It also does not consume the day,
+  so the 20:00 run still publishes normally.
+* **`force: true`** — proceeds when `claimDailyJob` reports the day is already
+  taken. This is the deliberate escape hatch for a run that failed half-way
+  (claim left as `claimed`, nothing sent). It is a separate mode in the UI, with
+  a confirmation, because it can double-post.
+* Neither flag is reachable from the cron path: `scheduler.ts` calls
+  `runSecurityJob(env)` exactly as before.
+
+### Destination precedence
+
+```
+HUNT console setting (ai_settings: security_channel)   ← wins
+  └─ TELEGRAM_SECURITY_CHANNEL secret
+       └─ nothing: the job skips every night with destination_or_token_missing
+```
+
+`MAIN` in either place means "post it to the main news channel".
+
+Tests: `test/hunt.test.ts` (25) covers channel validation and precedence,
+masking, the overview, the live probe (including a feed that answers 200 with
+an HTML login page), all three run modes, the four endpoints' auth and
+validation, and that the panel actually ships the button and the view.

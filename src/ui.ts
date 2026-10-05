@@ -74,6 +74,46 @@ export const APP_HTML = `<!DOCTYPE html>
   .switch input:checked + .sl:before{transform:translateX(-28px)}
   .switch input:disabled + .sl{opacity:.5;cursor:not-allowed}
   .log{margin-top:12px;padding:14px 18px;border-radius:16px;font:inherit;font-size:13px;line-height:1.9;white-space:pre-wrap;word-break:break-word;color:var(--ink);background:rgba(13,21,29,.06);border:1px solid rgba(255,255,255,.8);box-shadow:inset 2px 2px 5px rgba(120,135,165,.12);max-height:280px;overflow:auto}
+  /* HUNT — the security / bug-bounty console. English, LTR and deliberately
+     dark, so nobody mistakes it for the Persian news panel it lives inside. */
+  .hunt{direction:ltr;text-align:left;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .hunt-top{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:16px;padding:0 6px}
+  .hunt-brand{font-size:26px;font-weight:800;color:#0e2b22;letter-spacing:1px;text-shadow:1px 1px 0 rgba(255,255,255,.6)}
+  .hunt-brand span{display:block;font-size:12px;font-weight:500;letter-spacing:2px;text-transform:uppercase;color:var(--soft)}
+  .hunt-card{border-radius:22px;padding:18px 20px;margin-bottom:14px;color:#d7e8e0;
+    background:linear-gradient(160deg,rgba(12,20,27,.95),rgba(18,30,40,.92));
+    border:1px solid rgba(74,227,160,.22);box-shadow:0 22px 44px rgba(12,22,32,.32),inset 0 1px 0 rgba(255,255,255,.05)}
+  .hunt-card h3{font-size:13px;letter-spacing:2.4px;text-transform:uppercase;color:#4ae3a0;margin-bottom:12px}
+  .hunt-card p{font-size:12.5px;color:#90a9a0;margin-bottom:12px;line-height:1.7}
+  .hunt-card a{color:#7fd9ff;text-decoration:none;word-break:break-all}
+  .hunt-card input[type=text]{background:rgba(255,255,255,.06);border:1px solid rgba(74,227,160,.25);color:#e6f4ee;box-shadow:none;font-family:inherit}
+  .hunt-card input[type=text]:focus{border-color:#4ae3a0;box-shadow:0 0 0 4px rgba(74,227,160,.14)}
+  .hunt button{background:rgba(255,255,255,.07);border:1px solid rgba(74,227,160,.3);color:#cdeee0;box-shadow:none;font-family:inherit;font-size:13px}
+  .hunt button:hover:not(:disabled){background:rgba(74,227,160,.16)}
+  .hunt button.primary{background:linear-gradient(145deg,#2ec98a,#179b6b);border-color:rgba(74,227,160,.55);color:#06241a}
+  .hunt button.danger{background:rgba(217,69,91,.18);border-color:rgba(217,69,91,.45);color:#ff9fae}
+  .hunt .msg{font-size:13px}.hunt .msg.ok{color:#4ae3a0}.hunt .msg.err{color:#ff8fa1}
+  .hgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}
+  .hcell{padding:10px 12px;border-radius:14px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.07);border-left:3px solid rgba(255,255,255,.18)}
+  .hcell .k{display:block;font-size:10.5px;letter-spacing:1.4px;text-transform:uppercase;color:#7d968d}
+  .hcell .v{font-size:14px;font-weight:700;color:#e8f6ef;word-break:break-word}
+  .hcell.good{border-left-color:#4ae3a0}.hcell.good .v{color:#4ae3a0}
+  .hcell.warn{border-left-color:#e3b04a}.hcell.warn .v{color:#e3b04a}
+  .hcell.bad{border-left-color:#ff6b85}.hcell.bad .v{color:#ff6b85}
+  .hdiag{margin-top:12px;padding:12px 14px;border-radius:14px;font-size:13px;line-height:1.8;border:1px dashed rgba(255,107,133,.45);background:rgba(255,107,133,.08);color:#ffc9d2}
+  .hdiag.ok{border-color:rgba(74,227,160,.4);background:rgba(74,227,160,.08);color:#b7f0d8}
+  .hdiag b{color:#fff}
+  .hfeed{display:grid;grid-template-columns:minmax(0,1.1fr) repeat(4,auto) minmax(0,1fr);gap:10px;align-items:center;padding:10px 12px;border-radius:14px;margin-bottom:8px;font-size:12.5px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07)}
+  .hfeed .nm{font-weight:700;color:#e8f6ef}
+  .hfeed .nm small{display:block;font-weight:400;color:#7d968d}
+  .hfeed .st{font-weight:700}.hfeed .st.up{color:#4ae3a0}.hfeed .st.down{color:#ff6b85}.hfeed .st.stale{color:#e3b04a}
+  .hfeed .sam{color:#8fa8a0;font-size:11.5px;line-height:1.6;max-height:54px;overflow:hidden}
+  .hpre{margin-top:12px;padding:14px 16px;border-radius:14px;font-family:inherit;font-size:12.5px;line-height:1.85;white-space:pre-wrap;word-break:break-word;color:#d7e8e0;background:rgba(0,0,0,.35);border:1px solid rgba(74,227,160,.2);max-height:420px;overflow:auto}
+  .hitem{display:flex;gap:10px;justify-content:space-between;padding:8px 10px;border-radius:12px;font-size:12.5px;background:rgba(255,255,255,.035);margin-bottom:6px}
+  .hitem small{color:#7d968d;white-space:nowrap}
+  .hunt-row{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+  .hunt-btn{border-color:rgba(21,157,120,.45)!important;background:linear-gradient(145deg,rgba(255,255,255,.92),rgba(190,246,222,.7))!important}
+  @media(max-width:720px){.hfeed{grid-template-columns:1fr}.hfeed .sam{display:none}}
   @media(max-width:720px){.ch{grid-template-columns:1fr}.acts{justify-content:flex-start}.title{font-size:24px}}
 </style>
 </head>
@@ -98,6 +138,7 @@ export const APP_HTML = `<!DOCTYPE html>
       </div>
       <div style="display:flex;gap:12px;align-items:center">
         <div class="clock">تهران<b id="clock">--:--</b></div>
+        <button id="huntBtn" class="hunt-btn" title="کنسول اخبار هک و باگ‌بانتی">🎯 HUNT</button>
         <button id="logoutBtn">خروج</button>
       </div>
     </div>
@@ -160,6 +201,65 @@ export const APP_HTML = `<!DOCTYPE html>
       <pre id="toolsLog" class="log hidden" dir="rtl"></pre>
     </section>
   </div>
+
+  <div id="huntView" class="hunt hidden">
+    <div class="hunt-top">
+      <div class="hunt-brand">🎯 HUNT<span>security &amp; bug-bounty digest</span></div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <button id="huntRefreshBtn">↻ refresh</button>
+        <button id="huntBackBtn" class="hunt-btn">← بازگشت به پنل</button>
+      </div>
+    </div>
+
+    <section class="hunt-card">
+      <h3>status</h3>
+      <div class="hgrid" id="huntStatus"><div class="hcell"><span class="k">loading</span></div></div>
+      <div id="huntDiag" class="hdiag hidden"></div>
+    </section>
+
+    <section class="hunt-card">
+      <h3>destination channel</h3>
+      <p>Where the daily English digest is posted. Saved here it takes effect on the next run — no redeploy, no secret. Leave empty and the TELEGRAM_SECURITY_CHANNEL secret is used instead; with neither, the job skips every night. Add the bot to the channel as an admin first.</p>
+      <input id="huntChannel" type="text" placeholder="@my_security_channel  ·  -1001234567890  ·  MAIN" autocomplete="off">
+      <div class="hunt-row">
+        <button id="huntSaveChannelBtn" class="primary">save channel</button>
+        <button id="huntClearChannelBtn">clear (use secret)</button>
+      </div>
+      <div id="huntChannelMsg" class="msg"></div>
+    </section>
+
+    <section class="hunt-card">
+      <h3>feeds</h3>
+      <p>Fetches every enabled source right now and shows what the digest would make of it: items parsed, items kept by the relevance filter, and items not posted yet. A feed that answers 200 with zero items is the usual reason a digest goes quiet.</p>
+      <div class="hunt-row" style="margin-top:0"><button id="huntProbeBtn">probe feeds now</button></div>
+      <div id="huntFeedsMsg" class="msg"></div>
+      <div id="huntFeeds" style="margin-top:10px"></div>
+    </section>
+
+    <section class="hunt-card">
+      <h3>run</h3>
+      <p>Preview builds tonight's digest and sends nothing — no claim, no ledger write, so the real 20:00 run is unaffected. Send performs a normal run, which the once-a-day claim may refuse. Force ignores that claim and will post a second time today.</p>
+      <div class="hunt-row" style="margin-top:0">
+        <button id="huntPreviewBtn" class="primary">preview digest</button>
+        <button id="huntSendBtn">send now</button>
+        <button id="huntForceBtn" class="danger">force send</button>
+      </div>
+      <div id="huntRunMsg" class="msg"></div>
+      <pre id="huntPreview" class="hpre hidden"></pre>
+    </section>
+
+    <section class="hunt-card">
+      <h3>already delivered</h3>
+      <p>The dedupe ledger: an article in here is never posted again.</p>
+      <div id="huntRecent"></div>
+    </section>
+
+    <section class="hunt-card">
+      <h3>sources</h3>
+      <div id="huntSources"></div>
+      <div id="huntRejected" style="margin-top:14px"></div>
+    </section>
+  </div>
   <div class="signature">Akhal-Teke / DwAArKa</div>
 </div>
 <script>
@@ -195,8 +295,16 @@ async function api(path, options = {}) {
   return data;
 }
 
-function showLogin() { $('loginView').classList.remove('hidden'); $('appView').classList.add('hidden'); }
-function showApp() { $('loginView').classList.add('hidden'); $('appView').classList.remove('hidden'); }
+function showLogin() { $('loginView').classList.remove('hidden'); $('appView').classList.add('hidden'); $('huntView').classList.add('hidden'); }
+function showApp() { $('loginView').classList.add('hidden'); $('huntView').classList.add('hidden'); $('appView').classList.remove('hidden'); }
+// The HUNT console is a second view of the SAME authenticated page, not a
+// second app: no extra login, no page load, and '#hunt' makes it linkable.
+function showHunt() { $('loginView').classList.add('hidden'); $('appView').classList.add('hidden'); $('huntView').classList.remove('hidden'); loadHunt(); }
+function applyRoute() {
+  if (!$('loginView').classList.contains('hidden')) return; // not signed in yet
+  if (location.hash === '#hunt') showHunt(); else showApp();
+}
+window.addEventListener('hashchange', applyRoute);
 
 function tile(k, v, cls) {
   const t = mk('div', 'tile' + (cls ? ' ' + cls : ''));
@@ -349,6 +457,7 @@ $('loginBtn').onclick = async () => {
     $('password').value = '';
     setMsg($('loginMsg'), '', null);
     showApp();
+    applyRoute();
     await loadChannels();
     await loadStatus();
     await loadSettings();
@@ -557,12 +666,252 @@ $('testImageBtn').onclick = async () => {
   setMsg($('toolsMsg'), 'در حال ساخت و ارسال تصویر آزمایشی…', null);
   try {
     const r = await api('/api/telegram/test-image', { method: 'POST', body: '{}' });
-    setMsg($('toolsMsg'), '✅ تصویر آزمایشی ارسال شد — ' + r.cards + ' تصویر' + (r.ticker > 0 ? '، ' + r.ticker + ' عنوان دیگر' : '') + '.' + baleNote(r.bale), 'ok');
+    setMsg($('toolsMsg'), '✅ تصویر آزمایشی ارسال شد — ' + r.slides + ' تصویر (' + r.items + ' خبر)' + (r.ticker > 0 ? '، ' + r.ticker + ' عنوان دیگر' : '') + '.' + baleNote(r.bale), 'ok');
   } catch (e) {
     setMsg($('toolsMsg'), e.message, 'err');
   }
   btn.disabled = false;
 };
+
+
+/* ----------------------------------------------------------- HUNT console --
+ *
+ * The security digest is a once-a-day cron job whose commonest failure — no
+ * destination channel — is a silent skip. Everything below exists so that
+ * failure is visible in one screen, and fixable without a redeploy.
+ */
+
+let huntOverview = null;
+
+const hcell = (k, v, cls) => {
+  const e = mk('div', 'hcell' + (cls ? ' ' + cls : ''));
+  e.append(mk('span', 'k', k), mk('span', 'v', String(v)));
+  return e;
+};
+
+function enDate(iso) {
+  if (!iso) return 'never';
+  try { return new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Tehran' }).format(new Date(iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z')); }
+  catch { return iso; }
+}
+
+// The one line that tells the operator why nothing is being posted.
+function huntDiagnosis(o) {
+  if (!o.destination.botTokenConfigured) return ['fatal', 'No Telegram bot token is configured, so nothing can be sent anywhere.'];
+  if (!o.destination.configured) return ['fatal', 'No destination channel. The digest is built every night and thrown away — set a channel above and it will post at 20:00 Tehran.'];
+  if (o.claim.status === 'sent') return ['ok', 'Today\u2019s digest has already been delivered. The next one is due at 20:00 Tehran.'];
+  if (o.claim.status === 'skipped') return ['warn', 'Today\u2019s run finished without posting (' + (o.claim.detail || 'no reason recorded') + '). Probe the feeds below to see whether anything new exists.'];
+  if (o.claim.status === 'claimed') return ['warn', 'Today\u2019s run claimed the slot but never finished — it probably failed mid-way. \u201cForce send\u201d runs it again.'];
+  if (o.lastRun && o.lastRun.status === 'failed') return ['warn', 'The last run failed: ' + (o.lastRun.detail || 'no detail') + '.'];
+  if (!o.lastRun) return ['warn', 'This job has never run. It fires once a day at 20:00 Tehran; use \u201cpreview digest\u201d to test it right now.'];
+  if (!o.llm.configured) return ['warn', 'No LLM provider key is configured. The digest still posts, just without the one-line framing under each writeup.'];
+  return ['ok', 'Configured and running. Last run: ' + o.lastRun.status + ' \u2014 ' + (o.lastRun.detail || 'no detail') + '.'];
+}
+
+function renderHuntStatus(o) {
+  const box = $('huntStatus');
+  box.textContent = '';
+  const run = o.lastRun;
+  const rc = !run ? 'warn' : run.status === 'failed' ? 'bad' : run.status === 'partial' ? 'warn' : 'good';
+  const claimLabel = o.claim.status ? o.claim.status : 'not claimed yet';
+  const cells = [
+    ['destination', o.destination.configured ? (o.destination.masked || 'configured') : 'NOT SET', o.destination.configured ? 'good' : 'bad'],
+    ['configured via', o.destination.source === 'setting' ? 'this panel' : o.destination.source === 'secret' ? 'worker secret' : '—', o.destination.source ? '' : 'bad'],
+    ['bot token', o.destination.botTokenConfigured ? 'present' : 'MISSING', o.destination.botTokenConfigured ? 'good' : 'bad'],
+    ['schedule', o.schedule.cron + '  (' + o.schedule.description + ')', ''],
+    ['last run', run ? run.status : 'never', rc],
+    ['last run at', run ? enDate(run.finishedAt || run.startedAt) : '—', ''],
+    ['last detail', run && run.detail ? run.detail : '—', ''],
+    ['today (' + o.claim.date + ')', claimLabel, o.claim.status === 'sent' ? 'good' : o.claim.status ? 'warn' : ''],
+    ['llm providers', o.llm.configured ? o.llm.providers.join(', ') : 'none (digest still posts)', o.llm.configured ? 'good' : 'warn'],
+    ['items delivered', o.seen.total + ' total · ' + o.seen.last24h + ' in 24h', ''],
+  ];
+  for (const [k, v, c] of cells) box.appendChild(hcell(k, v, c));
+
+  const [kind, text] = huntDiagnosis(o);
+  const diag = $('huntDiag');
+  diag.className = 'hdiag' + (kind === 'ok' ? ' ok' : '');
+  diag.textContent = (kind === 'ok' ? '✅ ' : kind === 'warn' ? '⚠️ ' : '⛔ ') + text;
+  diag.classList.remove('hidden');
+}
+
+function renderHuntRecent(items) {
+  const box = $('huntRecent');
+  box.textContent = '';
+  if (!items || items.length === 0) {
+    box.appendChild(mk('div', 'hitem', 'Nothing delivered yet.'));
+    return;
+  }
+  for (const item of items) {
+    const row = mk('div', 'hitem');
+    const a = mk('a', '', item.title || item.link);
+    a.href = item.link; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    row.append(a, mk('small', '', item.sourceId + ' · ' + enDate(item.seenAt)));
+    box.appendChild(row);
+  }
+}
+
+function renderHuntSources(o) {
+  const box = $('huntSources');
+  box.textContent = '';
+  for (const src of o.sources) {
+    const row = mk('div', 'hfeed');
+    const nm = mk('div', 'nm', src.name);
+    nm.appendChild(mk('small', '', src.host));
+    row.append(
+      nm,
+      mk('div', '', src.kind),
+      mk('div', '', 'max ' + src.maxItems),
+      mk('div', '', 'stale > ' + src.staleHours + 'h'),
+      mk('div', 'st ' + (src.enabled ? 'up' : 'down'), src.enabled ? 'enabled' : 'disabled'),
+      mk('div', 'sam', '')
+    );
+    box.appendChild(row);
+  }
+  const rej = $('huntRejected');
+  rej.textContent = '';
+  if (o.rejected.length > 0) {
+    rej.appendChild(mk('div', 'hcell', ''));
+    rej.lastChild.textContent = 'No usable feed (deliberately excluded): ' + o.rejected.map((r) => r.name).join(' · ');
+  }
+}
+
+function renderHuntFeeds(feeds) {
+  const box = $('huntFeeds');
+  box.textContent = '';
+  for (const feed of feeds) {
+    const row = mk('div', 'hfeed');
+    const nm = mk('div', 'nm', feed.name);
+    nm.appendChild(mk('small', '', feed.host));
+    const state = !feed.ok ? ['down', feed.error || 'failed'] : feed.items === 0 ? ['down', 'empty'] : feed.stale ? ['stale', 'stale'] : ['up', 'ok'];
+    row.append(
+      nm,
+      mk('div', 'st ' + state[0], state[1]),
+      mk('div', '', feed.items + ' items'),
+      mk('div', '', feed.kept + ' kept'),
+      mk('div', '', feed.fresh + ' new'),
+      mk('div', 'sam', feed.newestAgeHours === null ? 'no dates in feed' : 'newest ' + feed.newestAgeHours + 'h ago')
+    );
+    box.appendChild(row);
+    for (const sample of feed.samples || []) {
+      const line = mk('div', 'hitem');
+      const a = mk('a', '', (sample.kept ? '✓ ' : '· ') + sample.title);
+      a.href = sample.link; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      line.append(a);
+      box.appendChild(line);
+    }
+  }
+}
+
+async function loadHunt() {
+  try {
+    const o = await api('/api/security/overview');
+    huntOverview = o;
+    renderHuntStatus(o);
+    renderHuntRecent(o.recent);
+    renderHuntSources(o);
+  } catch (e) {
+    const diag = $('huntDiag');
+    diag.className = 'hdiag';
+    diag.textContent = '⛔ ' + e.message;
+    diag.classList.remove('hidden');
+  }
+}
+
+function huntRunSummary(r) {
+  const parts = [
+    'status: ' + r.status + (r.reason ? ' (' + r.reason + ')' : ''),
+    'feeds ' + r.feedsOk + '/' + (r.feedsOk + r.feedsFailed),
+    r.items + ' items',
+    r.candidates + ' candidates',
+    r.fresh + ' new',
+    r.selected + ' ranked',
+  ];
+  if (!r.dryRun) parts.push(r.messages + ' message(s) sent');
+  return parts.join(' · ');
+}
+
+const HUNT_REASONS = {
+  destination_or_token_missing: 'No channel (or no bot token) is configured, so there is nothing to post to.',
+  all_feeds_failed: 'Every feed failed to load. Probe the feeds to see which ones.',
+  no_candidates: 'Feeds loaded, but nothing passed the relevance filter in the last 48 hours.',
+  all_already_posted: 'Everything currently in the feeds has already been delivered.',
+  nothing_to_render: 'Nothing survived selection, so no message was built.',
+  dry_run: 'Preview only — nothing was sent and nothing was recorded.',
+};
+
+async function runHunt(mode, btn) {
+  const buttons = [$('huntPreviewBtn'), $('huntSendBtn'), $('huntForceBtn')];
+  if (mode === 'force' && !confirm('Force a send? Today\u2019s digest may already be in the channel; this posts again.')) return;
+  for (const b of buttons) b.disabled = true;
+  setMsg($('huntRunMsg'), mode === 'preview' ? 'building tonight\u2019s digest…' : 'running…', null);
+  try {
+    const r = await api('/api/security/run', { method: 'POST', body: JSON.stringify({ mode }) });
+    const pre = $('huntPreview');
+    if (r.preview && r.preview.length > 0) {
+      pre.textContent = r.preview.join('\\n\\n———————————\\n\\n');
+      pre.classList.remove('hidden');
+    } else {
+      pre.classList.add('hidden');
+    }
+    const note = HUNT_REASONS[r.reason] || '';
+    const good = r.status === 'success' || r.status === 'partial' || r.reason === 'dry_run';
+    setMsg($('huntRunMsg'), (good ? '✅ ' : '⚠️ ') + huntRunSummary(r) + (note ? ' — ' + note : ''), good ? 'ok' : 'err');
+    loadHunt();
+  } catch (e) {
+    setMsg($('huntRunMsg'), e.message, 'err');
+  }
+  for (const b of buttons) b.disabled = false;
+}
+
+$('huntBtn').onclick = () => { location.hash = '#hunt'; applyRoute(); };
+$('huntBackBtn').onclick = () => { location.hash = ''; applyRoute(); };
+$('huntRefreshBtn').onclick = async () => { const b = $('huntRefreshBtn'); b.disabled = true; await loadHunt(); b.disabled = false; };
+
+$('huntSaveChannelBtn').onclick = async () => {
+  const btn = $('huntSaveChannelBtn');
+  const value = $('huntChannel').value.trim();
+  if (!value) { setMsg($('huntChannelMsg'), 'Type a channel, or press “clear” to fall back to the secret.', 'err'); return; }
+  btn.disabled = true;
+  try {
+    const r = await api('/api/security/channel', { method: 'POST', body: JSON.stringify({ channel: value }) });
+    $('huntChannel').value = '';
+    setMsg($('huntChannelMsg'), '✅ saved — the digest will post to ' + (r.masked || 'the configured channel') + '.', 'ok');
+    loadHunt();
+  } catch (e) { setMsg($('huntChannelMsg'), e.message, 'err'); }
+  btn.disabled = false;
+};
+
+$('huntClearChannelBtn').onclick = async () => {
+  const btn = $('huntClearChannelBtn');
+  btn.disabled = true;
+  try {
+    await api('/api/security/channel', { method: 'POST', body: JSON.stringify({ channel: null }) });
+    setMsg($('huntChannelMsg'), 'cleared — falling back to the TELEGRAM_SECURITY_CHANNEL secret.', 'ok');
+    loadHunt();
+  } catch (e) { setMsg($('huntChannelMsg'), e.message, 'err'); }
+  btn.disabled = false;
+};
+
+$('huntProbeBtn').onclick = async () => {
+  const btn = $('huntProbeBtn');
+  btn.disabled = true;
+  setMsg($('huntFeedsMsg'), 'fetching every enabled feed…', null);
+  try {
+    const r = await api('/api/security/feeds/probe', { method: 'POST', body: '{}' });
+    renderHuntFeeds(r.feeds);
+    const dead = r.feeds.filter((f) => !f.ok || f.items === 0);
+    const fresh = r.feeds.reduce((sum, f) => sum + f.fresh, 0);
+    setMsg($('huntFeedsMsg'),
+      (dead.length === 0 ? '✅ ' : '⚠️ ') + (r.feeds.length - dead.length) + '/' + r.feeds.length + ' feeds healthy · ' + fresh + ' unposted items available' + (dead.length > 0 ? ' — dead: ' + dead.map((f) => f.id).join(', ') : ''),
+      dead.length === 0 ? 'ok' : 'err');
+  } catch (e) { setMsg($('huntFeedsMsg'), e.message, 'err'); }
+  btn.disabled = false;
+};
+
+$('huntPreviewBtn').onclick = () => runHunt('preview');
+$('huntSendBtn').onclick = () => runHunt('send');
+$('huntForceBtn').onclick = () => runHunt('force');
 
 setInterval(() => { if (!$('appView').classList.contains('hidden')) loadStatus(); }, 60000);
 
@@ -570,6 +919,7 @@ setInterval(() => { if (!$('appView').classList.contains('hidden')) loadStatus()
   try {
     await api('/api/auth/session');
     showApp();
+    applyRoute();
     await loadChannels();
     await loadStatus();
     await loadSettings();

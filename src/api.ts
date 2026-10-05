@@ -17,6 +17,14 @@ import { getFreeModelCatalog, setPinnedModel } from './modelManager';
 import { AiError } from './openrouter';
 import { isCollectionOnly, setCollectionOnly } from './processingMode';
 import { resolveDestination } from './publisher';
+import {
+  buildSecurityOverview,
+  getStoredSecurityChannel,
+  maskChannel,
+  probeSecurityFeeds,
+  setStoredSecurityChannel,
+} from './security/admin';
+import { runSecurityJob } from './security/job';
 import { addSourceChannel } from './sourceChannels';
 import { getChannelStats, getStatusReport } from './status';
 import { sendTestImage } from './testImage';
@@ -351,6 +359,83 @@ export function createApi(): Hono<Bindings> {
     const deleted = await deleteChannel(c.env.DB, id);
     if (!deleted) return fail(c, 404, 'کانال یافت نشد.');
     return c.body(null, 204);
+  });
+
+  /* ------------------------------------------------------- HUNT console --
+   *
+   * The security / bug-bounty digest has no other face: it is a once-a-day
+   * cron job whose most common failure (no channel configured) is a silent
+   * skip. These four endpoints are what the HUNT panel calls, and they are
+   * read-only or explicitly operator-triggered — never automatic.
+   *
+   * All of them are English-facing, because the digest itself is English.
+   */
+
+  // Configuration, daily claim, last run, delivered-item ledger, feed list.
+  app.get('/api/security/overview', async (c) => {
+    const overview = await buildSecurityOverview(c.env);
+    return c.json(overview);
+  });
+
+  /**
+   * Points the digest at a channel without a redeploy.
+   *
+   * `channel: null` clears it, which falls back to the TELEGRAM_SECURITY_CHANNEL
+   * secret (and, when that is unset too, means "publish nothing").
+   */
+  app.post('/api/security/channel', async (c) => {
+    const body = await readJson(c);
+    if (!body) return fail(c, 400, 'Request body must be small, valid JSON.');
+    if (!('channel' in body)) return fail(c, 400, 'Field "channel" is required.');
+
+    const result = await setStoredSecurityChannel(c.env.DB, body.channel);
+    if (!result.ok) {
+      return fail(c, 400, 'Channel must be @username or a numeric chat id (or "MAIN").');
+    }
+    // Never echo the value back in full — same rule as the main destination.
+    return c.json({ ok: true, configured: Boolean(result.value), masked: maskChannel(result.value) });
+  });
+
+  // Live probe of every enabled feed: HTTP result, items, items kept by the
+  // relevance filter, items not yet posted, staleness. One subrequest per feed.
+  app.post('/api/security/feeds/probe', async (c) => {
+    const feeds = await probeSecurityFeeds(c.env);
+    return c.json({
+      ok: feeds.some((feed) => feed.ok),
+      checkedAt: new Date().toISOString(),
+      feeds,
+    });
+  });
+
+  /**
+   * Runs the digest on demand. body.mode:
+   *  - 'preview' (default) → build it and return the text; sends nothing,
+   *    claims nothing, records nothing;
+   *  - 'send'              → a normal run, which the daily claim may refuse;
+   *  - 'force'             → a run that ignores an existing claim. Deliberate
+   *    double-post risk, so it is its own mode rather than a flag.
+   */
+  app.post('/api/security/run', async (c) => {
+    const body = await readJson(c);
+    if (!body) return fail(c, 400, 'Request body must be small, valid JSON.');
+
+    const mode = body.mode === undefined ? 'preview' : body.mode;
+    if (mode !== 'preview' && mode !== 'send' && mode !== 'force') {
+      return fail(c, 400, 'Field "mode" must be "preview", "send" or "force".');
+    }
+
+    const stored = await getStoredSecurityChannel(c.env.DB);
+    const result = await runSecurityJob(c.env, {
+      dryRun: mode === 'preview',
+      force: mode === 'force',
+    });
+
+    return c.json({
+      ok: result.status !== 'failed',
+      mode,
+      storedChannel: Boolean(stored),
+      ...result,
+    });
   });
 
   app.all('/api/*', (c) => fail(c, 404, 'مسیر مورد نظر یافت نشد.'));

@@ -131,6 +131,7 @@ npx wrangler secret put TELEGRAM_DESTINATION_CHANNEL   # @your_channel or -10012
 npx wrangler secret put BALE_DESTINATION_CHANNEL       # @channel or numeric chat id
 npx wrangler secret put TELEGRAM_ADMIN_USER_ID         # numeric Telegram User.id
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET        # X-Telegram-Bot-Api-Secret-Token
+npx wrangler secret put TELEGRAM_SECURITY_CHANNEL      # optional: the HUNT digest channel
 ```
 
 | Variable | Secret | Purpose |
@@ -144,6 +145,7 @@ npx wrangler secret put TELEGRAM_WEBHOOK_SECRET        # X-Telegram-Bot-Api-Secr
 | `BALE_DESTINATION_CHANNEL` | yes (configuration, kept server-side) | Bale destination: `@channel` or numeric chat id. |
 | `TELEGRAM_ADMIN_USER_ID` | yes | Numeric Telegram `User.id` allowed to administer the bot over Telegram. |
 | `TELEGRAM_WEBHOOK_SECRET` | yes | Value Telegram echoes back in `X-Telegram-Bot-Api-Secret-Token`; must be ≥16 chars. |
+| `TELEGRAM_SECURITY_CHANNEL` | optional | Destination of the daily English security / bug-bounty digest. **Unset ⇒ that job silently posts nothing.** It can also be set at runtime from the 🎯 HUNT console, which takes precedence; `MAIN` points it at the main news channel. |
 
 `TELEGRAM_DESTINATION_CHANNEL` accepts `@channel_username` or a numeric channel id such as
 `-1001234567890`. It is read only in `src/publisher.ts` and is never returned by an API,
@@ -311,6 +313,41 @@ gets the same verdict.
   dates and phone numbers — is left untouched, and the raw `message_text`/`source_url`
   stay in D1 for tracking and deduplication.
 * No domain is ever fetched or resolved — external links are matched as text only.
+
+## 🎯 HUNT — the security / bug-bounty console
+
+The daily English writeup digest (see
+[`docs/TASK6-SECURITY-DIGEST.md`](./docs/TASK6-SECURITY-DIGEST.md)) used to have no face
+at all: it is a cron job whose most common failure — no `TELEGRAM_SECURITY_CHANNEL`
+configured — is a *silent skip*. Nothing appeared in the channel, nothing appeared in the
+panel, and the only way to tell the difference between "misconfigured", "feeds dead" and
+"nothing newsworthy today" was `wrangler tail` at the right minute.
+
+The admin panel now has a **🎯 HUNT** button in its header. It switches the same
+authenticated page to a second view (`#hunt`, LTR and English, because the digest is) —
+no second login, no separate deployment. It gives you:
+
+* **Status** — is a channel configured and where from (panel or secret, always masked),
+  is the bot token present, the cron, the last run and its detail, today's claim, how many
+  LLM providers are configured, and how many articles have ever been delivered. Underneath
+  sits one plain-English line naming the *reason* the digest is or is not posting.
+* **Destination channel** — set `@your_channel` (or a numeric id, or `MAIN`) and the next
+  run uses it. Stored in D1, so no redeploy and no secret rotation; clearing it falls back
+  to the `TELEGRAM_SECURITY_CHANNEL` secret. The value is never echoed back in full.
+* **Feeds** — one button fetches all six sources live and shows, per feed: HTTP outcome,
+  items parsed, items kept by the relevance filter, items **not yet posted**, how old the
+  newest entry is, and three real headlines with a ✓ against the ones that would be used.
+  A feed answering `200` with an HTML login page — the dangerous failure — shows as
+  `0 items`.
+* **Run** — `preview` builds tonight's digest and shows the exact message *without*
+  sending it, claiming the day or writing the dedupe ledger, so it is safe to press at any
+  time; `send now` performs a real run (which the once-a-day claim may refuse); `force
+  send` overrides that claim and will post a second time today (confirmation required).
+* **Already delivered** — the `security_seen` ledger, which is why an article is never
+  posted twice.
+
+Everything there is behind the same admin session as the rest of `/api`, and the four
+endpoints are listed in [Admin API](#admin-api).
 
 ## Telegram administration
 
@@ -523,7 +560,11 @@ another CI pipeline, make sure the build command installs dependencies
 | DELETE | `/api/channels/:id` | 204 |
 | GET | `/api/status` | counts, timestamps, error categories (no secrets) |
 | POST | `/api/telegram/test-message` | sends a test message to the destination; `{messageId}` on success, 503/502/429 with a Persian reason otherwise (no secrets) |
-| POST | `/api/telegram/test-image` | renders the real pending news and sends only the image; `{messageId, cards, ticker, bytes}` on success, 404 no news, 503 config, 502/429 Telegram |
+| POST | `/api/telegram/test-image` | renders the real pending news and sends only the album; `{messageId, slides, items, ticker, bytes}` on success, 404 no news, 503 config, 502/429 Telegram |
+| GET | `/api/security/overview` | HUNT console: destination state (masked), schedule, last run, today's claim, delivered-item ledger, source list |
+| POST | `/api/security/channel` | `{channel}` — sets or clears (`null`) the security digest channel; 400 on anything that is not `@username`, a numeric id or `MAIN`. The value is never echoed back in full |
+| POST | `/api/security/feeds/probe` | live fetch of every enabled security feed: items, items kept by the filter, unposted items, staleness, three sample headlines |
+| POST | `/api/security/run` | `{mode}` — `preview` (default; builds the digest, sends/claims/records nothing), `send` (normal run, the daily claim may refuse), `force` (ignores the claim) |
 
 Write endpoints require `content-type: application/json` and the session cookie
 (`HttpOnly`, `Secure`, `SameSite=Strict`), which blocks CSRF.
