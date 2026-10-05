@@ -16,6 +16,7 @@ import { block, doc, type InputRichMessage } from 'tg-rich-messages';
 import { listChannels } from './channels';
 import { baleSendMessage, baleSendPhoto } from './bale';
 import {
+  buildAlbumCaption,
   buildAlbumCaptions,
   MAX_ALBUM_SLIDES,
   MAX_IMAGE_ITEMS,
@@ -919,11 +920,21 @@ async function publishRunAlbum(input: {
     };
   }
 
+  const now = input.now ?? new Date();
+  // Bale has no album transport, so it keeps one caption per mirrored photo.
   const captions = buildAlbumCaptions(
     album.slides.map((slide) => slide.items),
     album.ticker,
     album.hidden,
-    input.now ?? new Date()
+    now
+  );
+  // Telegram gets ONE caption for the whole album: more than one caption makes
+  // the clients render the photos as separate messages instead of a slideshow.
+  const albumCaption = buildAlbumCaption(
+    album.slides.map((slide) => slide.items),
+    album.ticker,
+    album.hidden,
+    now
   );
 
   // Mirror every slide to Bale before the Telegram send. Independent and
@@ -967,7 +978,7 @@ async function publishRunAlbum(input: {
       token,
       destination,
       slides: album.slides,
-      captions,
+      caption: albumCaption,
       fetchImpl: input.fetchImpl,
       baseUrl: input.baseUrl,
     });
@@ -992,14 +1003,18 @@ async function publishRunAlbum(input: {
 
 /**
  * Sends the album: one `sendMediaGroup` for two or more slides — Telegram
- * shows them as a swipeable slideshow — and a plain `sendPhoto` for a single
- * slide, because a media group requires at least two items.
+ * shows them as a single swipeable slideshow — and a plain `sendPhoto` for a
+ * single slide, because a media group requires at least two items.
+ *
+ * The run summary travels as the album's single caption. Captioning every
+ * photo would make Telegram split the group into one message per photo, which
+ * is exactly the slideshow-less layout this transport exists to avoid.
  */
 async function sendAlbum(input: {
   token: string;
   destination: string;
   slides: RenderedSlideImage[];
-  captions: string[];
+  caption: string;
   fetchImpl?: typeof fetch;
   baseUrl?: string;
 }): Promise<void> {
@@ -1008,7 +1023,7 @@ async function sendAlbum(input: {
       token: input.token,
       chatId: input.destination,
       photo: input.slides[0].png,
-      caption: input.captions[0],
+      caption: input.caption,
       fetchImpl: input.fetchImpl,
       baseUrl: input.baseUrl,
     });
@@ -1017,10 +1032,8 @@ async function sendAlbum(input: {
   await sendMediaGroup({
     token: input.token,
     chatId: input.destination,
-    media: input.slides.map((slide, index) => ({
-      photo: slide.png,
-      caption: input.captions[index],
-    })),
+    media: input.slides.map((slide) => ({ photo: slide.png })),
+    caption: input.caption,
     fetchImpl: input.fetchImpl,
     baseUrl: input.baseUrl,
   });

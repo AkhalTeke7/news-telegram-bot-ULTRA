@@ -245,10 +245,17 @@ rasterizes each slide at 2560×1440 and Telegram delivers them together through
 Because every slide covers four news items, the whole run's news rides in the slideshow —
 nothing is demoted to a one-line ticker while slide capacity remains. The album holds at
 most ten slides (Telegram's media-group limit = 40 news items); only beyond that does the
-last slide grow the «سایر عناوین» ticker strip and caption overflow line again. Captions
-are plain text (no parse mode, so nothing can be rejected): the first slide carries the
-run header («اخبار لحظه‌ای» + Tehran date/time), every slide lists its items' headlines
-with their source channels, and the last slide appends the overflow headlines if any.
+last slide grow the «سایر عناوین» ticker strip and caption overflow line again.
+
+The album carries **exactly one caption, on its first photo** — that is what makes
+Telegram show the slides as a single item you swipe (or arrow) through. Captioning every
+photo makes the clients split the group into one message per photo, which is not a
+slideshow, so `sendMediaGroup()` takes a single album-level caption and the per-photo
+caption field does not exist. The caption is plain text (no parse mode, so nothing can be
+rejected): the run header («اخبار لحظه‌ای» + Tehran date/time), then one numbered line per
+news item with its headline and source channel, then the overflow headlines or
+«و n خبر دیگر» if the run did not fit. Bale, which has no album transport, still mirrors
+one captioned photo per slide.
 
 Browser Run limits are respected explicitly: renders are spaced by
 `IMAGE_RENDER_SPACING_MS` (default 10.5s, matching the Workers Free plan's ~1 Quick

@@ -22,6 +22,7 @@ import { baleSendPhoto } from './bale';
 import { readMsEnv } from './pipeline';
 import {
   DEFAULT_IMAGE_RENDER_SPACING_MS,
+  buildAlbumCaption,
   buildAlbumCaptions,
   renderRunAlbum,
   type BrowserBinding,
@@ -175,19 +176,26 @@ export async function sendTestImage(
     };
   }
 
+  const now = opts.now ?? new Date();
+  // One caption per photo for the Bale mirror (it sends photos one by one)…
   const captions = buildAlbumCaptions(
     album.slides.map((slide) => slide.items),
     album.ticker,
     album.hidden,
-    opts.now ?? new Date()
+    now
+  );
+  // …and a single caption for the Telegram album, so the client shows one
+  // swipeable slideshow rather than one captioned message per photo.
+  const albumCaption = buildAlbumCaption(
+    album.slides.map((slide) => slide.items),
+    album.ticker,
+    album.hidden,
+    now
   );
   const bytes = album.slides.reduce((sum, slide) => sum + slide.bytes, 0);
 
   try {
-    const media = album.slides.map((slide, index) => ({
-      photo: slide.png,
-      caption: captions[index],
-    }));
+    const media = album.slides.map((slide) => ({ photo: slide.png }));
     // A media group needs at least two photos; one slide goes as sendPhoto.
     const sent =
       media.length >= 2
@@ -195,6 +203,7 @@ export async function sendTestImage(
             token,
             chatId: destination,
             media,
+            caption: albumCaption,
             // Clearly a diagnostic; subscribers should not be buzzed for it.
             disableNotification: true,
             fetchImpl: opts.fetchImpl,
@@ -204,7 +213,7 @@ export async function sendTestImage(
             token,
             chatId: destination,
             photo: album.slides[0].png,
-            caption: captions[0],
+            caption: albumCaption,
             disableNotification: true,
             fetchImpl: opts.fetchImpl,
             baseUrl: opts.baseUrl,

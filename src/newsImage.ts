@@ -888,3 +888,70 @@ export function buildAlbumCaptions(
       : caption;
   });
 }
+
+/** Headline budget inside the single album caption: it carries every item. */
+const ALBUM_CAPTION_HEADLINE_CHARS = 90;
+
+/** «و n خبر دیگر» — the overflow tail shared by both caption builders. */
+const moreLine = (count: number): string => `🔎 و ${faDigits(count)} خبر دیگر`;
+
+/**
+ * Builds the ONE caption of a Telegram album.
+ *
+ * Telegram renders a media group as a single swipeable slideshow only when
+ * exactly one photo carries a caption (see `sendMediaGroup`). So the whole run
+ * is summarised here, in slide order, and `sendMediaGroup` puts it on the
+ * first photo:
+ *
+ *   📰 اخبار لحظه‌ای — ۱۴۰۵/۰۷/۱۲ ساعت ۱۴:۳۰ تهران
+ *   ۱) {emoji} <headline> — 📡 @channel
+ *   ۲) {emoji} <headline> — 📡 @channel
+ *   🔎 سایر عناوین: … · …            (or «و n خبر دیگر»)
+ *
+ * Lines are added while they fit under MAX_CAPTION_CHARS; whatever does not
+ * fit is folded into the trailing count, so the caption never truncates a
+ * headline mid-word and never exceeds Telegram's limit.
+ */
+export function buildAlbumCaption(
+  slides: readonly (readonly ImageNewsItem[])[],
+  ticker: readonly TickerNewsItem[],
+  hidden: number,
+  now: Date
+): string {
+  const items = slides.flat();
+  const stamp = formatTehranDateTime(now);
+  const header = stamp ? `📰 اخبار لحظه‌ای — ${stamp} تهران` : '📰 اخبار لحظه‌ای';
+
+  const tickerHeadlines = ticker.filter((t) => !t.more).map((t) => cleanCaptionLine(t.text)).filter(Boolean);
+  const tickerLine = tickerHeadlines.length > 0 ? `🔎 سایر عناوین: ${tickerHeadlines.join(' · ')}` : '';
+  // Reserve room for the longest tail either branch below could append.
+  const reserve = Math.max(tickerLine.length, moreLine(hidden + items.length).length) + 1;
+
+  const lines = [header];
+  let used = header.length;
+  let dropped = 0;
+
+  items.forEach((item, index) => {
+    const topic = topicPresentation(item.category, `${item.title} ${item.summary}`);
+    const line = `${faDigits(index + 1)}) ${topic.emoji} ${cleanCaptionLine(
+      item.title,
+      ALBUM_CAPTION_HEADLINE_CHARS
+    )} — 📡 ${channelLabel(item.channelUsername)}`;
+    if (used + 1 + line.length + reserve > MAX_CAPTION_CHARS) {
+      dropped++;
+      return;
+    }
+    lines.push(line);
+    used += 1 + line.length;
+  });
+
+  // A dropped headline is still «one more news item», so it joins the count.
+  if (dropped > 0) lines.push(moreLine(hidden + dropped));
+  else if (tickerLine) lines.push(tickerLine);
+  else if (hidden > 0) lines.push(moreLine(hidden));
+
+  const caption = lines.join('\n');
+  return caption.length > MAX_CAPTION_CHARS
+    ? `${caption.slice(0, MAX_CAPTION_CHARS - 1).trimEnd()}…`
+    : caption;
+}

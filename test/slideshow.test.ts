@@ -5,6 +5,7 @@ import { extractOgImage, fetchOgImage, resolveImageUrl } from '../src/slideshow/
 import { readPngSize, renderSlides } from '../src/slideshow/render';
 import {
   buildSlideCaption,
+  buildSlideshowAlbumCaption,
   runSlideshowJob,
   selectSlideshowItems,
   slideItemKey,
@@ -378,6 +379,35 @@ describe('captions and keyboard', () => {
     }
   });
 
+  it('merges the slide headlines into one album caption', () => {
+    const caption = buildSlideshowAlbumCaption(
+      [
+        { item: { headline: 'نرخ بهره ثابت ماند', sourceName: 'رویترز' }, category: { emoji: '💰' } },
+        { item: { headline: 'توافق تازه امضا شد', sourceName: 'ایسنا' }, category: { emoji: '🌍' } },
+      ],
+      { brand: 'اخبار فوری', stamp: '۱۴۰۵/۰۷/۱۲ ساعت ۱۴:۳۰' }
+    );
+
+    const lines = caption.split('\n');
+    expect(lines[0]).toBe('📰 اخبار فوری — ۱۴۰۵/۰۷/۱۲ ساعت ۱۴:۳۰');
+    expect(lines[1]).toBe('۱) 💰 نرخ بهره ثابت ماند — 📡 رویترز');
+    expect(lines[2]).toBe('۲) 🌍 توافق تازه امضا شد — 📡 ایسنا');
+    expect(caption.length).toBeLessThanOrEqual(1024);
+  });
+
+  it('counts the headlines that do not fit instead of overflowing', () => {
+    const caption = buildSlideshowAlbumCaption(
+      Array.from({ length: 10 }, (_, i) => ({
+        item: { headline: `${'عنوان بسیار طولانی خبری '.repeat(5)}${i}`, sourceName: 'منبع خبری' },
+        category: { emoji: '📰' },
+      })),
+      { brand: 'اخبار فوری', stamp: '۱۴۰۵/۰۷/۱۲ ساعت ۱۴:۳۰' }
+    );
+
+    expect(caption.length).toBeLessThanOrEqual(1024);
+    expect(caption).toMatch(/🔎 و [۰-۹]+ خبر دیگر در اسلایدها$/);
+  });
+
   it('builds a browse caption with the link', () => {
     const caption = browseCaption(
       { fileId: 'f', title: 'عنوان', source: 'رویترز', link: 'https://n.test/1' },
@@ -431,10 +461,13 @@ describe('runSlideshowJob', () => {
     }
 
     const calls: string[] = [];
-    const fetchImpl: typeof fetch = async (input) => {
+    let albumMedia: { caption?: string }[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
       calls.push(url);
       if (url.includes('/sendMediaGroup')) {
+        const form = (init as RequestInit).body as FormData;
+        albumMedia = JSON.parse(String(form.get('media')));
         return new Response(
           JSON.stringify({
             ok: true,
@@ -469,6 +502,13 @@ describe('runSlideshowJob', () => {
     // Exactly ONE album call, never one message per item.
     expect(calls.filter((c) => c.includes('/sendMediaGroup'))).toHaveLength(1);
     expect(calls.filter((c) => c.includes('/sendPhoto'))).toHaveLength(0);
+
+    // …and exactly ONE caption inside it, on the first photo. Telegram only
+    // shows the group as a swipeable slideshow when no other photo has one.
+    expect(albumMedia).toHaveLength(3);
+    expect(albumMedia.filter((m) => m.caption !== undefined)).toHaveLength(1);
+    expect(albumMedia[0].caption).toContain('خبر 1');
+    expect(albumMedia[0].caption).toContain('خبر 3');
 
     const rows = await env.DB.prepare(
       `SELECT item_key, file_id, message_id FROM slideshow_sent ORDER BY item_key`

@@ -16,8 +16,8 @@ Once per run (cron `0 */3 * * *` UTC, i.e. 03:30 / 06:30 / 09:30 … Tehran):
    kept only if it occurs *verbatim* in that item's own text.
 4. Resolves each article's `og:image` (one bounded fetch per item).
 5. Renders one **1080×1350 PNG** per item through Browser Run.
-6. Sends **one Telegram album** (`sendMediaGroup`, 2–10 photos, a short caption
-   on each; `sendPhoto` when only one slide survived).
+6. Sends **one Telegram album** (`sendMediaGroup`, 2–10 photos, a **single**
+   caption on the first photo; `sendPhoto` when only one slide survived).
 7. **Only after Telegram confirms**, writes the items to `slideshow_sent` —
    together with each slide's `file_id`.
 8. Optionally archives the PNGs to R2 (`MEDIA`), best effort.
@@ -65,8 +65,17 @@ nesting and no injection. A keyword the model invented simply never matches.
 plus `overflow: hidden` on a fixed-height flex child. The headline clamps to 3.
 Text is also character-clamped before it reaches the template.
 
-**Captions carry the counter too** (`۳/۱۰` is on the slide, `3/10` in the
-caption) because Telegram shows only the first caption in some clients.
+**One caption per album — never one per photo.** Telegram renders a media
+group as a single swipeable slideshow (arrows on desktop/web, swiping on
+mobile) only while exactly one item carries a caption. The moment a second
+photo has one, every client falls back to showing the photos as separate
+captioned messages. So `buildSlideshowAlbumCaption()` merges the run into one
+plain-text index (`📰 brand — date`, then `۱) {emoji} headline — 📡 source`
+per slide) and `sendMediaGroup()` attaches it to `media[0]` only; the other
+items are sent caption-free by construction. Headlines that would push the
+caption past the 1024-character limit are folded into a trailing
+«و n خبر دیگر». The per-slide counter still lives *on* the rendered slide
+(`۳/۱۰`), and `buildSlideCaption()` is used for the lone-photo fallback.
 
 **`/slideshow` costs no renders.** It pages through the *last album already
 posted* using the Telegram `file_id` recorded at send time, via

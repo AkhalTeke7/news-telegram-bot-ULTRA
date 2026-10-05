@@ -21,7 +21,7 @@
 
 import { fnv1a, canonicalUrl } from '../lib/hash';
 import { describeError } from '../lib/http';
-import { jalaliDateTime, localDateKey, resolveTimeZone } from '../lib/jalali';
+import { jalaliDateTime, localDateKey, resolveTimeZone, toPersianDigits } from '../lib/jalali';
 import { resolveDailyBudget } from '../llm/budget';
 import { resolveProviders } from '../llm/providers';
 import { resolveDestination } from '../publisher';
@@ -172,6 +172,57 @@ export async function selectSlideshowItems(
     if (fresh.length === limit) break;
   }
   return fresh;
+}
+
+/** Headline budget per line inside the one album caption. */
+const ALBUM_CAPTION_HEADLINE_CHARS = 90;
+
+/**
+ * Builds the ONE caption of the album.
+ *
+ * Telegram only renders a media group as a single swipeable slideshow when a
+ * single photo carries a caption; captioning each photo makes every client
+ * show the photos as separate messages. So the per-slide headlines are merged
+ * into one plain-text index of the run, which `sendMediaGroup` attaches to the
+ * first photo:
+ *
+ *   📰 اخبار فوری — ۱۴۰۵/۰۷/۱۲ ساعت ۱۴:۳۰
+ *   ۱) {emoji} <headline> — 📡 <source>
+ *   ۲) {emoji} <headline> — 📡 <source>
+ *
+ * Lines that do not fit under CAPTION_LIMIT are folded into «و n خبر دیگر»,
+ * so the caption stays whole instead of being cut mid-headline.
+ */
+export function buildSlideshowAlbumCaption(
+  slides: readonly {
+    item: { headline: string; sourceName: string };
+    category: { emoji: string };
+  }[],
+  opts: { brand: string; stamp: string }
+): string {
+  const header = clampChars(`📰 ${opts.brand} — ${opts.stamp}`, 120);
+  const lines = [header];
+  let used = header.length;
+  let dropped = 0;
+
+  slides.forEach((slide, index) => {
+    const line = `${toPersianDigits(index + 1)}) ${slide.category.emoji} ${clampChars(
+      slide.item.headline,
+      ALBUM_CAPTION_HEADLINE_CHARS
+    )} — 📡 ${clampChars(slide.item.sourceName, 40)}`;
+    // Keep room for a possible trailing «و n خبر دیگر» line.
+    if (used + 1 + line.length + 24 > CAPTION_LIMIT) {
+      dropped++;
+      return;
+    }
+    lines.push(line);
+    used += 1 + line.length;
+  });
+
+  if (dropped > 0) lines.push(`🔎 و ${toPersianDigits(dropped)} خبر دیگر در اسلایدها`);
+
+  const caption = lines.join('\n');
+  return caption.length > CAPTION_LIMIT ? `${caption.slice(0, CAPTION_LIMIT - 1).trimEnd()}…` : caption;
 }
 
 /** One short caption per album photo. Plain text: no parse mode to reject. */
@@ -363,16 +414,11 @@ export async function runSlideshowJob(
   }
 
   /* -- 6. deliver ---------------------------------------------------------- */
-  const captions = render.slides.map((slide, i) =>
-    buildSlideCaption(
-      {
-        headline: slide.meta.item.headline,
-        sourceName: slide.meta.item.sourceName,
-        category: slide.meta.category,
-      },
-      i + 1,
-      render.slides.length
-    )
+  // ONE caption for the whole album — a caption per photo would make Telegram
+  // render the photos as separate messages instead of a swipeable slideshow.
+  const albumCaption = buildSlideshowAlbumCaption(
+    render.slides.map((slide) => ({ item: slide.meta.item, category: slide.meta.category })),
+    { brand, stamp }
   );
 
   let sentMessages: SentMessage[] = [];
@@ -381,7 +427,8 @@ export async function runSlideshowJob(
       sentMessages = await sendMediaGroup({
         token,
         chatId: destination as DestinationChat,
-        media: render.slides.map((slide, i) => ({ photo: slide.png, caption: captions[i] })),
+        media: render.slides.map((slide) => ({ photo: slide.png })),
+        caption: albumCaption,
         fetchImpl: opts.fetchImpl,
       });
     } else {
@@ -390,7 +437,16 @@ export async function runSlideshowJob(
           token,
           chatId: destination,
           photo: render.slides[0].png,
-          caption: captions[0],
+          // A lone photo is not an album, so it carries its own slide caption.
+          caption: buildSlideCaption(
+            {
+              headline: render.slides[0].meta.item.headline,
+              sourceName: render.slides[0].meta.item.sourceName,
+              category: render.slides[0].meta.category,
+            },
+            1,
+            1
+          ),
           fetchImpl: opts.fetchImpl,
         }),
       ];

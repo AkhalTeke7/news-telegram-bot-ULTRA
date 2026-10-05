@@ -56,8 +56,12 @@ function harness(opts: { png?: ArrayBuffer | null; photoStatus?: number } = {}) 
       });
     }),
   };
+  const albums: { caption?: string }[][] = [];
   const fetchImpl = vi.fn(async (url: unknown, init: RequestInit) => {
     calls.push({ url: String(url), body: init.body ? String(init.body) : undefined });
+    if (init.body instanceof FormData && init.body.has('media')) {
+      albums.push(JSON.parse(String(init.body.get('media'))));
+    }
     const status = opts.photoStatus ?? 200;
     // A media group answers with an ARRAY of messages; everything else with one.
     const isGroup = String(url).includes('sendMediaGroup');
@@ -73,7 +77,7 @@ function harness(opts: { png?: ArrayBuffer | null; photoStatus?: number } = {}) 
       { status, headers: { 'content-type': 'application/json' } }
     );
   }) as unknown as typeof fetch;
-  return { browser, fetchImpl, calls };
+  return { browser, fetchImpl, calls, albums };
 }
 
 interface Sent {
@@ -192,6 +196,13 @@ describe('sendTestImage', () => {
     expect(h.browser.quickAction).toHaveBeenCalledTimes(2);
     expect(h.calls).toHaveLength(1);
     expect(h.calls[0].url).toBe(`https://api.telegram.org/bot${BOT_TOKEN}/sendMediaGroup`);
+
+    // The album carries ONE caption, on its first photo, so Telegram renders
+    // the slides as a single swipeable item instead of two messages.
+    expect(h.albums).toHaveLength(1);
+    expect(h.albums[0]).toHaveLength(2);
+    expect(h.albums[0].filter((item) => item.caption !== undefined)).toHaveLength(1);
+    expect(h.albums[0][0].caption).toContain('📰 اخبار لحظه‌ای');
 
     // The rendered HTML carries the real summaries (one card per render).
     // (quickAction payload is asserted through the html the browser receives.)

@@ -2,6 +2,7 @@ import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { runPublishing, type PublishableMessage } from '../src/publisher';
 import {
+  buildAlbumCaption,
   buildAlbumCaptions,
   buildImageHtml,
   buildRunFrame,
@@ -518,6 +519,9 @@ describe('runPublishing image integration', () => {
 
     expect(h.groups).toHaveLength(1);
     expect(h.groups[0].count).toBe(2);
+    // The album is ONE swipeable slideshow: a caption on the first photo only.
+    expect(h.groups[0].captions.filter(Boolean)).toHaveLength(1);
+    expect(h.groups[0].captions[0]).toContain('📰 اخبار لحظه‌ای');
     const firstText = h.order.indexOf('sendMessage');
     const album = h.order.indexOf('sendMediaGroup');
     expect(album).toBeGreaterThanOrEqual(0);
@@ -945,6 +949,59 @@ describe('renderRunAlbum', () => {
     });
     expect(album!.slides).toHaveLength(1);
     expect(screenshot).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('buildAlbumCaption (the single album caption)', () => {
+  const card = (id: number, title: string, channel: string) => ({
+    id,
+    channelUsername: channel,
+    category: 'economy' as const,
+    title,
+    summary: 'خلاصهٔ خبر.',
+  });
+
+  it('summarises every slide in one numbered, plain-text caption', () => {
+    const caption = buildAlbumCaption(
+      [
+        [card(1, 'بودجهٔ سال آینده تصویب شد', 'news_one'), card(2, 'عرضهٔ سهام جدید', 'news_two')],
+        [card(3, 'عنوان سوم', 'news_three')],
+      ],
+      [{ id: 9, channelUsername: 'news_five', text: 'عنوان پنجم' }],
+      0,
+      new Date('2026-10-04T10:00:00.000Z')
+    );
+
+    expect(caption).toContain('📰 اخبار لحظه‌ای');
+    expect(caption).toContain(`${faDigits(1)}) `);
+    expect(caption).toContain('بودجهٔ سال آینده تصویب شد');
+    expect(caption).toContain('عرضهٔ سهام جدید');
+    expect(caption).toContain(`${faDigits(3)}) `);
+    expect(caption).toContain('عنوان سوم');
+    expect(caption).toContain('@news_three');
+    expect(caption).toContain('🔎 سایر عناوین: عنوان پنجم');
+    expect(caption).not.toContain('<');
+    expect(caption.length).toBeLessThanOrEqual(1000);
+  });
+
+  it('reports the hidden items when there is no ticker', () => {
+    const caption = buildAlbumCaption([[card(1, 'عنوان یک', 'ch')]], [], 7, new Date(NOW));
+    expect(caption).toContain(`و ${faDigits(7)} خبر دیگر`);
+  });
+
+  it('folds whatever does not fit into the trailing count, never overflowing', () => {
+    const slides = Array.from({ length: 10 }, (_, slide) =>
+      Array.from({ length: 4 }, (_, i) =>
+        card(slide * 4 + i + 1, `${'عنوان بسیار طولانی '.repeat(6)}${slide}-${i}`, `chan_${slide}`)
+      )
+    );
+    const caption = buildAlbumCaption(slides, [], 3, new Date(NOW));
+
+    expect(caption.length).toBeLessThanOrEqual(1000);
+    expect(caption.split('\n')[0]).toContain('📰 اخبار لحظه‌ای');
+    // Dropped headlines are counted, not silently lost, and the caption still
+    // ends on a whole line rather than a mid-word cut.
+    expect(caption).toMatch(/🔎 و [۰-۹]+ خبر دیگر$/);
   });
 });
 

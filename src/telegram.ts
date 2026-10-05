@@ -403,18 +403,23 @@ export async function sendPhoto(opts: SendPhotoOptions): Promise<SentMessage> {
   return data.result;
 }
 
-/** One photo of an album. Captions are plain text (no parse mode). */
+/** One photo of an album. The album caption lives on the request, not here. */
 export interface MediaGroupItem {
   /** Raw PNG bytes. Sent as multipart/form-data, never written to any store. */
   photo: ArrayBuffer;
-  /** Optional caption; Telegram allows 0-1024 characters per item. */
-  caption?: string;
 }
 
 export interface SendMediaGroupOptions extends TelegramClientOptions {
   chatId: string;
   /** The album: 2–10 photos, delivered by Telegram as one slideshow. */
   media: MediaGroupItem[];
+  /**
+   * ONE plain-text caption for the whole album (0-1024 chars).
+   *
+   * It is attached to the first photo only — see the note on the function
+   * below for why giving every photo its own caption breaks the slideshow.
+   */
+  caption?: string;
   disableNotification?: boolean;
   timeoutMs?: number;
 }
@@ -422,14 +427,25 @@ export interface SendMediaGroupOptions extends TelegramClientOptions {
 export const SEND_MEDIA_GROUP_TIMEOUT_MS = 30_000;
 export const MEDIA_GROUP_MIN_ITEMS = 2;
 export const MEDIA_GROUP_MAX_ITEMS = 10;
+/** Telegram's hard per-caption limit for media. */
+export const MEDIA_CAPTION_LIMIT = 1024;
 
 /**
  * Bot API `sendMediaGroup` — the album/slideshow transport.
  *
  * Photos are uploaded as multipart attachments referenced by
- * `attach://card<i>`; captions are plain text so no entity parsing can ever
+ * `attach://card<i>`; the caption is plain text so no entity parsing can ever
  * reject the album. Error handling mirrors `sendPhoto` exactly, so the
  * publisher can treat an album failure like any other photo failure.
+ *
+ * SLIDESHOW INVARIANT — at most one caption per album.
+ * Telegram only renders a media group as a single swipeable item (arrows on
+ * desktop/web, swiping on mobile) when **one** caption is present, on the
+ * first item. As soon as a second item carries a caption the clients fall
+ * back to rendering every photo as its own captioned block, which looks like
+ * N separate messages instead of one slideshow. This function therefore takes
+ * a single album-level caption and attaches it to `media[0]`; the remaining
+ * items are sent caption-free by construction, so no caller can regress it.
  */
 export async function sendMediaGroup(opts: SendMediaGroupOptions): Promise<SentMessage[]> {
   if (opts.media.length < MEDIA_GROUP_MIN_ITEMS || opts.media.length > MEDIA_GROUP_MAX_ITEMS) {
@@ -444,13 +460,15 @@ export async function sendMediaGroup(opts: SendMediaGroupOptions): Promise<SentM
 
   const form = new FormData();
   form.set('chat_id', opts.chatId);
+  // The caption goes on the first photo ONLY; see the slideshow invariant above.
+  const albumCaption = opts.caption?.trim() ? opts.caption.slice(0, MEDIA_CAPTION_LIMIT) : '';
   form.set(
     'media',
     JSON.stringify(
-      opts.media.map((item, i) => ({
+      opts.media.map((_item, i) => ({
         type: 'photo',
         media: `attach://card${i}`,
-        ...(item.caption ? { caption: item.caption } : {}),
+        ...(i === 0 && albumCaption ? { caption: albumCaption } : {}),
       }))
     )
   );
