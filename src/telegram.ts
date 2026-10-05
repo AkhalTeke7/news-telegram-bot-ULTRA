@@ -270,6 +270,11 @@ export interface TelegramRichMessage {
 export interface SendRichMessageOptions extends TelegramClientOptions {
   chatId: DestinationChat;
   richMessage: TelegramRichMessage;
+  /**
+   * In-memory files referenced from rich HTML as `attach://<name>`. This keeps
+   * generated slides private and avoids requiring R2 or public image URLs.
+   */
+  attachments?: readonly { name: string; data: ArrayBuffer; filename?: string; contentType?: string }[];
   disableNotification?: boolean;
   timeoutMs?: number;
 }
@@ -292,12 +297,32 @@ export async function sendRichMessage(opts: SendRichMessageOptions): Promise<Sen
   };
   if (opts.disableNotification) payload.disable_notification = true;
 
+  let body: BodyInit;
+  let headers: HeadersInit | undefined;
+  if (opts.attachments?.length) {
+    const form = new FormData();
+    form.append('chat_id', String(opts.chatId));
+    form.append('rich_message', JSON.stringify(opts.richMessage));
+    if (opts.disableNotification) form.append('disable_notification', 'true');
+    for (const attachment of opts.attachments) {
+      form.append(
+        attachment.name,
+        new Blob([attachment.data], { type: attachment.contentType ?? 'application/octet-stream' }),
+        attachment.filename ?? attachment.name
+      );
+    }
+    body = form;
+  } else {
+    headers = { 'content-type': 'application/json' };
+    body = JSON.stringify(payload);
+  }
+
   let res: Response;
   try {
     res = await doFetch(`${base}/bot${opts.token}/sendRichMessage`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
+      ...(headers ? { headers } : {}),
+      body,
       signal: AbortSignal.timeout(opts.timeoutMs ?? SEND_RICH_MESSAGE_TIMEOUT_MS),
     });
   } catch (e) {

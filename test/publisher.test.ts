@@ -92,9 +92,12 @@ function harness(opts: { sendStatus?: number; retryAfter?: number } = {}) {
       return new Response('{}', { status: 200 });
     }
 
-    if (href.includes('sendMediaGroup')) {
+    if (href.includes('sendRichMessage')) {
       const form = body as FormData;
-      const media = JSON.parse(String(form.get('media'))) as { caption?: string }[];
+      const rich = JSON.parse(String(form.get('rich_message'))) as { html?: string };
+      const count = Array.from(form.keys()).filter((key) => /^slide\d+$/.test(key)).length;
+      const caption = rich.html?.match(/<figcaption>(.*?)<\/figcaption>/s)?.[1];
+      const media = Array.from({ length: count }, (_, index) => index === 0 && caption ? { caption } : {});
       albums.push({ media });
       if (status >= 400) {
         return new Response(
@@ -107,7 +110,7 @@ function harness(opts: { sendStatus?: number; retryAfter?: number } = {}) {
         );
       }
       return new Response(
-        JSON.stringify({ ok: true, result: media.map(() => ({ message_id: ++messageId, date: 1 })) }),
+        JSON.stringify({ ok: true, result: { message_id: ++messageId, date: 1 } }),
         { status: 200, headers: { 'content-type': 'application/json' } }
       );
     }

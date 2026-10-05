@@ -17,6 +17,7 @@
  *  - rate limits stop the pass instead of hammering; leftovers retry next run
  */
 
+import { doc, slideshow } from 'tg-rich-messages';
 import { baleSendPhoto } from './bale';
 import {
   buildAlbumCaption,
@@ -27,8 +28,8 @@ import {
 } from './newsImage';
 import {
   isValidDestinationChat,
-  sendMediaGroup,
   sendPhoto,
+  sendRichMessage,
   TelegramError,
   TelegramRateLimitError,
   type DestinationChat,
@@ -707,15 +708,29 @@ async function sendAlbum(input: {
       baseUrl: input.baseUrl,
     });
   }
-  const messages = await sendMediaGroup({
+  // A media group is only a photo album. Rich Messages has a real slideshow
+  // block; attach:// references let Telegram consume our in-memory PNGs in the
+  // same request, with no R2 bucket or public image hosting.
+  const attachments = input.slides.map((slide, index) => ({
+    name: `slide${index}`,
+    data: slide.png,
+    filename: `slide-${index + 1}.png`,
+    contentType: 'image/png',
+  }));
+  const rich = doc(
+    slideshow(
+      attachments.map((attachment) => ({ url: `attach://${attachment.name}`, type: 'photo' as const })),
+      { caption: input.caption }
+    )
+  );
+  return await sendRichMessage({
     token: input.token,
-    chatId: input.destination,
-    media: input.slides.map((slide) => ({ photo: slide.png })),
-    caption: input.caption,
+    chatId: input.destination as DestinationChat,
+    richMessage: rich.toInputRichMessage({ isRtl: true, skipEntityDetection: true }),
+    attachments,
     fetchImpl: input.fetchImpl,
     baseUrl: input.baseUrl,
   });
-  return messages[0] ?? null;
 }
 
 function logImage(status: string, extra: Record<string, unknown> = {}): void {

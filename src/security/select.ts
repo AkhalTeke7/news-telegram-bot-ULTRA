@@ -29,6 +29,9 @@ const MAX_WHY = 220;
 const SelectionSchema = z.object({
   i: z.coerce.number().int().min(0),
   why: z.string().min(3).max(600),
+  /** Exact excerpts from the supplied feed text, used as a mechanical proof gate. */
+  discoveryEvidence: z.string().min(3).max(300),
+  exploitEvidence: z.string().min(3).max(300),
   tags: z.array(z.string().min(1).max(32)).max(4).optional(),
 });
 
@@ -56,20 +59,19 @@ const SYSTEM = [
   'You are the editor of a channel for security researchers and bug bounty hunters.',
   '',
   'You are given a numbered list of candidate items from security feeds.',
-  'Select the ones that genuinely explain a vulnerability: how it was found,',
-  'how it works, or how it was exploited. Rank the best first.',
+  'Choose AT MOST ONE item, and only when the supplied text proves all of these:',
+  '1. It is a concrete, specific vulnerability found by the article author.',
+  '2. The author actually exploited or reproduced the vulnerability.',
+  '3. The text explains both the discovery and the successful exploitation.',
   '',
-  'Prefer, in this order:',
-  '1. A concrete writeup of a specific bug with technical detail.',
-  '2. Novel research into a technique or an attack class.',
-  '3. A substantive update to reference material on a named technique.',
+  'Return no items if either discovery or exploitation is merely claimed, implied,',
+  'hypothetical, instructional, or absent from the supplied text. Reject technique',
+  'references, repository changes, exploit databases, news, vulnerability roundups,',
+  'generic research, product marketing, announcements, interviews, conference',
+  'recaps, hiring posts, listicles, and tool releases.',
   '',
-  'Reject: product marketing, company announcements, interviews, conference',
-  'recaps, hiring posts, listicles with no technical content, and anything',
-  'whose entire substance is "tool X released".',
-  '',
-  'For every item you select, write "why": ONE short English sentence naming',
-  'the vulnerability class and the core trick. Be concrete and specific.',
+  'For the item, write "why": ONE short English sentence naming the vulnerability',
+  'class, how the author found it, and how the author successfully exploited it.',
   'Good: "SSRF guard reads the last 32 bits of an RFC 8215 NAT64 address, so a',
   'crafted literal shows a public decoy while routing to link-local."',
   'Bad: "An interesting security issue worth reading about."',
@@ -77,12 +79,15 @@ const SYSTEM = [
   'Hard rules:',
   '• Use ONLY the text supplied. Add nothing from your own knowledge.',
   '• Never invent a CVE id, version number, product name, or bounty amount.',
-  '• If an item has too little information to describe, do not select it.',
+  '• If an item has too little information to prove both steps, do not select it.',
+  '• discoveryEvidence and exploitEvidence must each be an EXACT verbatim excerpt',
+  '  from the supplied title/context. Never paraphrase evidence.',
   '• Do not translate anything. Write in English.',
   '• "tags" are 1-3 lowercase keywords, e.g. ["ssrf","bypass"].',
   '',
   'Output a single valid JSON object, no Markdown:',
-  '{"items":[{"i":0,"why":"...","tags":["ssrf"]}]}',
+  '{"items":[{"i":0,"why":"...","discoveryEvidence":"exact quote",',
+  '"exploitEvidence":"exact quote","tags":["ssrf"]}]}',
   '',
   '"i" is the item number from the input and must be repeated exactly.',
   '',
@@ -136,7 +141,8 @@ export async function selectWriteups(
 ): Promise<Selection[]> {
   if (candidates.length === 0) return [];
 
-  const limit = Math.max(1, Math.min(opts.limit ?? 10, 20));
+  // This channel deliberately publishes one proven real-world bug, never a digest.
+  const limit = 1;
   const listing = candidates
     .map((candidate, index) =>
       [
@@ -187,7 +193,11 @@ export async function selectWriteups(
     const candidate = candidates[index];
     const sourceText = `${candidate.title} ${candidate.context}`;
     const why = tidy(item.why);
-    if (!why || !assertGrounded(why, sourceText)) continue;
+    const normalizedSource = sourceText.replace(/\s+/g, ' ').toLocaleLowerCase('en');
+    const hasExactEvidence = [item.discoveryEvidence, item.exploitEvidence].every((evidence) =>
+      normalizedSource.includes(evidence.replace(/\s+/g, ' ').trim().toLocaleLowerCase('en'))
+    );
+    if (!why || !assertGrounded(why, sourceText) || !hasExactEvidence) continue;
 
     seen.add(index);
     out.push({
