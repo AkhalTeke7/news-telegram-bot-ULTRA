@@ -352,7 +352,7 @@ describe('selectWriteups', () => {
   it('keeps a grounded selection and normalizes its tags', async () => {
     const out = await selectWriteups(candidates, {
       providers,
-      fetchImpl: llm({ items: [{ i: 0, why: 'SSRF guard misreads NAT64.', tags: ['SSRF', 'By pass!'] }] }),
+      fetchImpl: llm({ items: [{ i: 0, why: 'SSRF guard misreads NAT64.', discoveryEvidence: 'A NAT64 SSRF bypass', exploitEvidence: 'guard misreads the last 32 bits', tags: ['SSRF', 'By pass!'] }] }),
     });
     expect(out).toHaveLength(1);
     expect(out[0].index).toBe(0);
@@ -380,8 +380,8 @@ describe('selectWriteups', () => {
       providers,
       fetchImpl: llm({
         items: [
-          { i: 0, why: 'First take on the guard.' },
-          { i: 0, why: 'Second take on the guard.' },
+          { i: 0, why: 'First take on the guard.', discoveryEvidence: 'A NAT64 SSRF bypass', exploitEvidence: 'guard misreads the last 32 bits' },
+          { i: 0, why: 'Second take on the guard.', discoveryEvidence: 'A NAT64 SSRF bypass', exploitEvidence: 'guard misreads the last 32 bits' },
         ],
       }),
     });
@@ -555,8 +555,13 @@ describe('runSecurityJob', () => {
                 message: {
                   content: JSON.stringify({
                     items: [
-                      { i: 0, why: 'SSRF guard misreads NAT64 addresses.', tags: ['ssrf'] },
-                      { i: 2, why: 'Cookie policy parsing lets a flag be dropped.', tags: ['cookies'] },
+                      {
+                        i: 0,
+                        why: 'The author found and exploited an SSRF guard that misread NAT64 addresses.',
+                        discoveryEvidence: 'single misread pair of bytes',
+                        exploitEvidence: 'point at 169.254.169.254',
+                        tags: ['ssrf'],
+                      },
                     ],
                   }),
                 },
@@ -606,9 +611,9 @@ describe('runSecurityJob', () => {
     expect(sent[0]).not.toContain('auto-merge');
     // The real content is there.
     expect(sent[0]).toContain('NAT64 SSRF Bypass');
-    expect(sent[0]).toContain('Exploiting insecure cookie policies');
-    expect(sent[0]).toContain('Krayin CRM');
-    expect(sent[0]).toContain('SSRF guard misreads NAT64 addresses.');
+    expect(sent[0]).not.toContain('Exploiting insecure cookie policies');
+    expect(sent[0]).not.toContain('Krayin CRM');
+    expect(sent[0]).toContain('found and exploited an SSRF guard');
 
     const rows = await env.DB.prepare(`SELECT COUNT(*) AS n FROM security_seen`).first<{ n: number }>();
     expect(rows?.n).toBeGreaterThan(0);
@@ -651,7 +656,7 @@ describe('runSecurityJob', () => {
     });
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain('NAT64 SSRF Bypass');
-    expect(sent[0]).toContain('Krayin CRM');
+    expect(sent[0]).not.toContain('Krayin CRM');
 
     // Next day, the feeds still carry yesterday's articles at the top.
     const tomorrow = new Date(NOW.getTime() + 24 * 3_600_000);
@@ -673,8 +678,8 @@ describe('runSecurityJob', () => {
 
   it('skips entirely once every candidate has already been posted', async () => {
     const sent: string[] = [];
-    // Only the exploit feed, whose single item is delivered on the first run.
-    const opts = { sources: [EXPLOIT_SRC], fetchImpl: makeFetch({ sent }) };
+    // Only a qualifying narrative writeup can be delivered.
+    const opts = { sources: [WRITEUP_SRC], fetchImpl: makeFetch({ sent }) };
     const first = await runSecurityJob(baseEnv() as never, { now: NOW, ...opts });
     expect(first.status).toBe('success');
 
@@ -683,33 +688,33 @@ describe('runSecurityJob', () => {
       ...opts,
     });
     expect(second.status).toBe('skipped');
-    expect(second.reason).toBe('all_already_posted');
+    expect(second.reason).toBe('no_verified_exploited_bug');
     expect(sent).toHaveLength(1);
   });
 
-  it('still publishes a plain list when no LLM is configured', async () => {
+  it('publishes nothing when no LLM can verify a bug', async () => {
     const sent: string[] = [];
     const result = await runSecurityJob(
       baseEnv({ OPENROUTER_API_KEY: undefined, NVIDIA_API_KEY: undefined }) as never,
       { now: NOW, sources: TEST_SOURCES, fetchImpl: makeFetch({ sent }) }
     );
-    expect(result.status).toBe('success');
+    expect(result.status).toBe('skipped');
+    expect(result.reason).toBe('no_verified_exploited_bug');
     expect(result.selected).toBe(0);
-    expect(sent[0]).toContain('NAT64 SSRF Bypass');
-    // No framing line, but the digest still went out.
-    expect(sent[0]).not.toContain('SSRF guard misreads');
+    expect(sent).toHaveLength(0);
   });
 
-  it('still publishes when the LLM returns garbage', async () => {
+  it('publishes nothing when the LLM returns garbage', async () => {
     const sent: string[] = [];
     const result = await runSecurityJob(baseEnv() as never, {
       now: NOW,
       sources: TEST_SOURCES,
       fetchImpl: makeFetch({ sent, llm: { choices: [{ message: { content: 'not json' } }] } }),
     });
-    expect(result.status).toBe('success');
+    expect(result.status).toBe('skipped');
+    expect(result.reason).toBe('no_verified_exploited_bug');
     expect(result.selected).toBe(0);
-    expect(sent).toHaveLength(1);
+    expect(sent).toHaveLength(0);
   });
 
   it('reports partial when one feed is down but still publishes', async () => {

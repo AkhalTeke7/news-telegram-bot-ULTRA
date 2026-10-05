@@ -82,9 +82,19 @@ function stubWorld(opts: { sent?: string[]; telegramOk?: boolean; deadFeeds?: bo
       return xml(`<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel></channel></rss>`);
     }
     if (url.includes('/chat/completions')) {
-      return new Response(JSON.stringify({ choices: [{ message: { content: '{"items":[]}' } }] }), {
-        headers: { 'content-type': 'application/json' },
-      });
+      const selection = {
+        items: [{
+          i: 0,
+          why: 'The author found and exploited an SSRF guard that misread a NAT64 address.',
+          discoveryEvidence: 'single misread pair of bytes',
+          exploitEvidence: 'point at 169.254.169.254',
+          tags: ['ssrf'],
+        }],
+      };
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: JSON.stringify(selection) } }] }),
+        { headers: { 'content-type': 'application/json' } }
+      );
     }
     if (url.includes('/sendMessage')) {
       opts.sent?.push(JSON.parse(String((init as RequestInit).body)).text as string);
@@ -306,7 +316,8 @@ describe('probeSecurityFeeds', () => {
     const after = await probeSecurityFeeds(baseEnv() as never, { now: NOW, fetchImpl: impl });
     const exploit = after.find((f) => f.id === 'exploit-db')!;
     expect(exploit.kept).toBe(1);
-    expect(exploit.fresh).toBe(0);
+    // Exploit indexes are no longer publishable; an untouched entry remains fresh.
+    expect(exploit.fresh).toBe(1);
   });
 
   it('flags a feed that is dead, and one that answers 200 with HTML', async () => {
@@ -401,7 +412,7 @@ describe('manual run modes', () => {
     // Everything fresh was delivered by the first run, so a force has nothing
     // left to say — which is itself the honest answer.
     const forced = await runSecurityJob(e, { now: NOW, fetchImpl: impl, force: true });
-    expect(forced.reason).toBe('all_already_posted');
+    expect(forced.reason).toBe('no_verified_exploited_bug');
     expect(forced.forced).toBe(true);
 
     // With the ledger cleared, the same force really does post again.

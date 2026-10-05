@@ -12,9 +12,9 @@ describe('wrangler config', () => {
     ]);
   });
 
-  it('binds KV, R2 and the browser without leaking ids into vars', () => {
+  it('binds KV and the browser without requiring R2 or leaking ids into vars', () => {
     expect(wranglerConfig.kv_namespaces[0].binding).toBe('KV');
-    expect(wranglerConfig.r2_buckets[0].binding).toBe('MEDIA');
+    expect('r2_buckets' in wranglerConfig).toBe(false);
     expect(wranglerConfig.browser.binding).toBe('BROWSER');
     expect(wranglerConfig.vars.TIMEZONE).toBe('Asia/Tehran');
   });

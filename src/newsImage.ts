@@ -613,6 +613,9 @@ export async function renderRunImage(
       `Browser Run did not return a PNG (status ${response.status})`
     );
   }
+  if (isSuspiciousBlankSlide(png, size.width, size.height)) {
+    throw new NewsImageError('validate', 'Browser Run returned a blank slide');
+  }
 
   return {
     png,
@@ -639,6 +642,15 @@ export const SCREENSHOT_RETRIES = 2;
 
 export const sleepMs = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+
+/**
+ * Browser Run occasionally returns its empty white startup canvas as a valid
+ * full-size PNG. Such an image compresses implausibly well. Tiny synthetic PNG
+ * fixtures are excluded from this production guard.
+ */
+export function isSuspiciousBlankSlide(png: ArrayBuffer, width: number, height: number): boolean {
+  return width >= 1000 && height >= 1000 && png.byteLength >= 1024 && png.byteLength < 30_000;
+}
 
 /** One fully rendered slide of the album: a PNG plus the news it carries. */
 export interface RenderedSlideImage {
@@ -791,6 +803,9 @@ export async function renderRunAlbum(opts: RenderAlbumOptions): Promise<Rendered
             'validate',
             `Browser Run did not return a PNG (status ${response.status})`
           );
+        }
+        if (isSuspiciousBlankSlide(png, size.width, size.height)) {
+          throw new NewsImageError('validate', 'Browser Run returned a blank slide');
         }
         rendered = {
           items: chunk,

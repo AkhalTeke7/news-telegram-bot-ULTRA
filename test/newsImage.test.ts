@@ -10,6 +10,7 @@ import {
   faDigits,
   IMAGE_HEIGHT,
   IMAGE_WIDTH,
+  isSuspiciousBlankSlide,
   MAX_CAPTION_CHARS,
   MAX_IMAGE_ITEMS,
   MAX_TICKER_ITEMS,
@@ -71,6 +72,14 @@ function fakePng(): ArrayBuffer {
   return bytes.buffer;
 }
 
+describe('blank slide guard', () => {
+  it('rejects an implausibly small full-size canvas but not test fixtures or real-sized output', () => {
+    expect(isSuspiciousBlankSlide(new ArrayBuffer(15_000), IMAGE_WIDTH, IMAGE_HEIGHT)).toBe(true);
+    expect(isSuspiciousBlankSlide(new ArrayBuffer(64), IMAGE_WIDTH, IMAGE_HEIGHT)).toBe(false);
+    expect(isSuspiciousBlankSlide(new ArrayBuffer(80_000), IMAGE_WIDTH, IMAGE_HEIGHT)).toBe(false);
+  });
+});
+
 /** Records every Browser Run call and every Telegram call, in order. */
 function harness(opts: { png?: ArrayBuffer; sendStatus?: number } = {}) {
   const order: string[] = [];
@@ -94,10 +103,13 @@ function harness(opts: { png?: ArrayBuffer; sendStatus?: number } = {}) {
   let messageId = 100;
   const fetchImpl = vi.fn(async (url: unknown, init: RequestInit) => {
     const href = String(url);
-    if (href.includes('sendMediaGroup')) {
-      order.push('sendMediaGroup');
+    if (href.includes('sendRichMessage')) {
+      order.push('sendRichMessage');
       const form = init.body as FormData;
-      const media = JSON.parse(String(form.get('media'))) as { caption?: string }[];
+      const rich = JSON.parse(String(form.get('rich_message'))) as { html?: string };
+      const count = Array.from(form.keys()).filter((key) => /^slide\d+$/.test(key)).length;
+      const caption = rich.html?.match(/<figcaption>(.*?)<\/figcaption>/s)?.[1];
+      const media = Array.from({ length: count }, (_, index) => index === 0 && caption ? { caption } : {});
       groups.push({
         captions: media.map((item) => item.caption ?? ''),
         count: media.length,
@@ -488,7 +500,7 @@ describe('runPublishing image integration', () => {
     expect(h.browser.quickAction).toHaveBeenCalledTimes(3);
     expect(h.groups).toHaveLength(1);
     expect(h.groups[0].count).toBe(3);
-    expect(h.order).toEqual(['browser', 'browser', 'browser', 'sendMediaGroup']);
+    expect(h.order).toEqual(['browser', 'browser', 'browser', 'sendRichMessage']);
     expect(h.texts).toHaveLength(0);
     expect(report.image?.sent).toBe(true);
     expect(report.image?.channels).toBe(2);

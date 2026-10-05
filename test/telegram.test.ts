@@ -83,6 +83,26 @@ describe('telegram bot api client', () => {
     });
   });
 
+  it('uploads in-memory Rich Message slideshow attachments without R2', async () => {
+    let form: FormData | undefined;
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      form = (init as RequestInit).body as FormData;
+      return jsonResponse({ ok: true, result: { message_id: 9, date: 1 } });
+    };
+
+    await sendRichMessage({
+      token: 'T',
+      chatId: '@somechannel',
+      richMessage: { html: '<tg-slideshow><img src="attach://slide0"/></tg-slideshow>' },
+      attachments: [{ name: 'slide0', data: new Uint8Array([1, 2, 3]).buffer, filename: 'slide.png' }],
+      fetchImpl,
+    });
+
+    expect(form?.get('chat_id')).toBe('@somechannel');
+    expect(form?.get('rich_message')?.toString()).toContain('<tg-slideshow>');
+    expect(form?.get('slide0')).toBeInstanceOf(File);
+  });
+
   it('throws TelegramError(400) when the username is unknown', async () => {
     const fetchImpl: typeof fetch = async () =>
       jsonResponse({ ok: false, description: 'Bad Request: chat not found' }, 400);

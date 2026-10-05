@@ -52,12 +52,10 @@ const FEED_MAX_BYTES = 2_000_000;
 /** How far back an item may have been published and still be new to us. */
 const LOOKBACK_HOURS = 48;
 /** Context handed to the model per item. Keeps one batched call affordable. */
-const CONTEXT_CHARS = 320;
-/** Hard ceiling on items in one digest, before per-section caps. */
-const MAX_CANDIDATES = 24;
-const MAX_WRITEUPS = 6;
-const MAX_EXPLOITS = 6;
-const MAX_REPO_UPDATES = 5;
+const CONTEXT_CHARS = 2_000;
+/** Enough candidates for the model to choose one rigorously evidenced report. */
+const MAX_CANDIDATES = 16;
+const MAX_WRITEUPS = 1;
 /** Telegram hard limit is 4096; leave room for the footer. */
 const MAX_MESSAGE_CHARS = 3900;
 /** Rows older than this are pruned each run, so the table cannot grow forever. */
@@ -434,11 +432,10 @@ export async function runSecurityJob(
     feedHealth.kept = kept;
   }
 
-  const allCandidates = [
-    ...cap(byKind.writeup, MAX_WRITEUPS * 2),
-    ...cap(byKind.exploit, MAX_EXPLOITS),
-    ...cap(byKind.repo, MAX_REPO_UPDATES * 2),
-  ].slice(0, MAX_CANDIDATES);
+  // Only narrative writeups can prove that their author both found and exploited
+  // a real bug. PoC indexes and reference-repository commits are intentionally
+  // excluded, even when their titles contain vulnerability keywords.
+  const allCandidates = cap(byKind.writeup, MAX_CANDIDATES);
   base.candidates = allCandidates.length;
 
   if (allCandidates.length === 0) {
@@ -485,48 +482,28 @@ export async function runSecurityJob(
       : [];
   base.selected = selections.length;
 
-  // No LLM, or it failed: fall back to the plain list in feed order. The
-  // digest still goes out, just without the framing lines.
-  const chosenWriteups: RenderedEntry[] =
-    selections.length > 0
-      ? selections.map((selection) => {
-          const candidate = writeupCandidates[selection.index];
-          return {
-            title: candidate.entry.title,
-            link: candidate.entry.link,
-            sourceName: candidate.source.name,
-            why: selection.why,
-            tags: selection.tags,
-          };
-        })
-      : writeupCandidates.slice(0, MAX_WRITEUPS).map((candidate) => ({
-          title: candidate.entry.title,
-          link: candidate.entry.link,
-          sourceName: candidate.source.name,
-          tags: [],
-        }));
+  // Fail closed. Without model-verified, verbatim discovery and exploitation
+  // evidence, posting nothing is safer than publishing another generic digest.
+  if (selections.length === 0) {
+    if (!dryRun) await markClaimSkipped(env.DB, 'security', claim.date, 'no_verified_exploited_bug');
+    return { ...base, reason: 'no_verified_exploited_bug' };
+  }
+
+  const chosenWriteups: RenderedEntry[] = selections.map((selection) => {
+    const candidate = writeupCandidates[selection.index];
+    return {
+      title: candidate.entry.title,
+      link: candidate.entry.link,
+      sourceName: candidate.source.name,
+      why: selection.why,
+      tags: selection.tags,
+    };
+  });
 
   const sections: DigestSections = {
     writeups: chosenWriteups,
-    exploits: fresh
-      .filter((candidate) => candidate.source.kind === 'exploit')
-      .slice(0, MAX_EXPLOITS)
-      .map((candidate) => ({
-        title: candidate.entry.title,
-        link: candidate.entry.link,
-        sourceName: candidate.source.name,
-        tags: [],
-      })),
-    repoUpdates: fresh
-      .filter((candidate) => candidate.source.kind === 'repo')
-      .slice(0, MAX_REPO_UPDATES)
-      .map((candidate) => ({
-        title: candidate.entry.title,
-        link: candidate.entry.link,
-        sourceName: candidate.source.name,
-        tags: [],
-        referencePath: candidate.verdict.referencePath,
-      })),
+    exploits: [],
+    repoUpdates: [],
   };
 
   const messages = buildDigestMessages(sections, digestDate(now, timeZone));
